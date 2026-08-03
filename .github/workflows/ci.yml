@@ -1,0 +1,18 @@
+# Calls the canonical plugin-ci reusable workflow (GetBusbar/busbar/.github/workflows/plugin-ci.yml)
+# instead of hand-copying build/test/signoff steps here — see that file for what actually runs.
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  ci:
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@dev
+    with:
+      plugin_crate: busbar-auth-ldap-plugin
+      plugin_kind: auth
+      plugin_alias: ldap
+      service: none

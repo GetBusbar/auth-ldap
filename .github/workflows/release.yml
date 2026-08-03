@@ -1,0 +1,193 @@
+# Release: on a version tag (e.g. v1.0.0), build the auth-ldap plugin cdylib for all 5
+# supported targets, pack + sign each into a loadable busbar plugin tarball, and publish them to
+# THIS repo's own GitHub Release.
+#
+# This mirrors busbarAI/.github/workflows/release.yml's `auth-plugins` job — same 5-target
+# matrix, same busbar-plugin-pack pack/sign step (built from a sibling busbar checkout), same
+# BUSBAR_SIGN_KEY-or-`--allow-unsigned` fallback, same `gh release upload` + build-provenance
+# attestation — just scoped to this one plugin.
+#
+# This plugin's own version (the `v*` tag pushed here) is NOT tied to busbar's version number —
+# it is independently versioned (see README), separate from whichever busbar branch it happens to
+# build against via the .busbar-ref file at repo root.
+#
+# The packed manifest's abi_version is the auth PAYLOAD schema version (kind: auth => 2, the 1.5.2
+# auth ABI). It is not set here: busbar-plugin-pack derives it from `--kind auth` against the
+# busbar-plugin-sdk this plugin builds against (AUTH_ABI_VERSION = 2).
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write      # create the Release + upload assets
+  id-token: write      # OIDC identity for keyless Sigstore signing (provenance)
+  attestations: write  # record the build-provenance attestation
+
+jobs:
+  # Create the Release first so the parallel per-target upload jobs have something to attach to
+  # (uploading from a matrix without a pre-existing release races -> "release not found").
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          create_out=$(gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "busbar-auth-ldap ${GITHUB_REF_NAME}" \
+            --verify-tag --generate-notes 2>&1)
+          status=$?
+          set -e
+          echo "$create_out"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          # Only swallow the specific "a release already exists for this tag" race (two runs of this
+          # job triggered for the same tag) — any other failure (auth error, --verify-tag rejection,
+          # --generate-notes error, etc.) must fail the job, not be silently papered over by falling
+          # through to `gh release view`.
+          if echo "$create_out" | grep -qi "already exists"; then
+            echo "Release ${GITHUB_REF_NAME} already exists — reusing it (parallel/retried run)."
+            gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}"
+          else
+            exit "$status"
+          fi
+
+  # One signed .tar.gz per target: {cdylib + manifest.json}, packed by busbar-plugin-pack and
+  # signed with the busbar release PRIVATE key (BUSBAR_SIGN_KEY secret) so it verifies as
+  # first-party against the PUBLIC key embedded in busbar's own release binaries. If that secret
+  # isn't provisioned on this repo, falls back to an UNSIGNED tarball (loadable only under
+  # plugins.trust.allow_unsigned) rather than blocking the release — same seam busbarAI's own
+  # release.yml documents (TODO(release-keys)).
+  auth-plugin:
+    needs: create-release
+    name: auth-plugin (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            libext: so
+            libprefix: lib
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            libext: so
+            libprefix: lib
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            libext: dylib
+            libprefix: lib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            libext: dylib
+            libprefix: lib
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            libext: dll
+            libprefix: ""
+    steps:
+      - name: Checkout auth-ldap
+        uses: actions/checkout@v7
+        with:
+          path: auth-ldap
+
+      - name: Resolve busbar ref from .busbar-ref
+        id: ref
+        run: echo "sha=$(cut -d' ' -f1 auth-ldap/.busbar-ref)" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Checkout busbar (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: GetBusbar/busbar
+          ref: ${{ steps.ref.outputs.sha }}
+          path: busbarAI
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the auth-ldap plugin cdylib
+        working-directory: auth-ldap
+        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+
+      - name: Build busbar-plugin-pack (from the sibling busbar checkout)
+        working-directory: busbarAI
+        run: cargo build --release --target ${{ matrix.target }} -p busbar-plugin-pack
+        shell: bash
+
+      - name: Package + sign the plugin tarball
+        env:
+          BUSBAR_SIGN_KEY: ${{ secrets.BUSBAR_SIGN_KEY }}
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          target="${{ matrix.target }}"
+          outdir="plugin-dist"; mkdir -p "$outdir"
+          pack="busbarAI/target/${target}/release/busbar-plugin-pack"
+          [ -x "$pack" ] || pack="busbarAI/target/${target}/release/busbar-plugin-pack.exe"
+          unsigned_flag=""
+          if [ -z "${BUSBAR_SIGN_KEY:-}" ]; then
+            echo "::warning::BUSBAR_SIGN_KEY secret is not provisioned — packaging an UNSIGNED plugin tarball (loadable only under plugins.trust.allow_unsigned). See busbarAI's release.yml TODO(release-keys) seam."
+            unsigned_flag="--allow-unsigned"
+          fi
+          lib="auth-ldap/target/${target}/release/${{ matrix.libprefix }}busbar_auth_ldap_plugin.${{ matrix.libext }}"
+          "$pack" pack \
+            --lib "$lib" \
+            --name "busbar-auth-ldap-plugin" --alias "ldap" --kind auth \
+            --version "$ver" --publisher busbar \
+            --description "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder and add ldap to auth.chain / auth.methods with auth.methods.ldap settings (url, bind_dn_template, base_dn, group_attr)." \
+            --license Apache-2.0 \
+            --out "${outdir}/busbar-auth-ldap-plugin-${ver}-${target}.tar.gz" \
+            $unsigned_flag
+          ls -l "$outdir"
+        shell: bash
+
+      - name: Attach plugin tarball to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" plugin-dist/*.tar.gz --repo "${GITHUB_REPOSITORY}" --clobber
+        shell: bash
+
+      # Keyless (Sigstore/OIDC) build-provenance attestation binding this tarball's digest to this
+      # workflow run + commit — `gh attestation verify <tarball> --repo ${{ github.repository }}`.
+      - name: Attest plugin build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "plugin-dist/*.tar.gz"
+
+  # Instant marketing-site rebuild the moment this plugin ships a real release -- marketing's
+  # deploy.yml listens for this exact repository_dispatch event type (plus its own daily-poll
+  # fallback, so a missed/failed dispatch here is never a permanent gap). Same RELEASE_DISPATCH_TOKEN
+  # pattern busbar core's own release.yml uses for its downstream fan-out -- see that file's
+  # notify-downstream job for the template this mirrors. Fails loud (not a silent no-op) if the
+  # secret isn't provisioned, so a missing secret can't masquerade as "nothing to notify."
+  notify-marketing:
+    needs: [auth-plugin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch upstream-release to the marketing site
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::RELEASE_DISPATCH_TOKEN is not provisioned on this repo -- cannot notify" \
+                 "marketing instantly. marketing's own daily poll will still pick this release up" \
+                 "within 24h (self-healing fallback intact)." >&2
+            exit 1
+          fi
+          gh api "repos/GetBusbar/marketing/dispatches" \
+            -f event_type=upstream-release \
+            -f "client_payload[repo]=${GITHUB_REPOSITORY}" \
+            -f "client_payload[tag]=${GITHUB_REF_NAME}"
