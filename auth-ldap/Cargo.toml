@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "busbar-auth-ldap"
+version = "0.1.0"
+publish = false
+edition = "2021"
+rust-version = "1.97"
+description = "The AD/LDAP auth module for busbar: BIND a username/password against an LDAP/LDAPS directory and map the user's group memberships (memberOf DNs) to a Principal. Implements busbar_api::AuthModule + busbar_api::LoginModule. Opens its own LDAP socket (like hashicorp-vault), unlike the core-executes-HTTP-hop model of auth-oidc."
+license = "Apache-2.0"
+
+[dependencies]
+# INTERIM local path dep into a sibling busbarAI checkout (currently on feat/1.5.2-token-exchange —
+# the branch the auth ABI v2 / LoginModule lives on). Once busbarAI ships publicly this becomes a
+# pinned git/crates.io dep, same as auth-oidc / hashicorp-vault.
+busbar-api = { path = "../../busbarAI/crates/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# The LDAP client. `sync` gives the blocking LdapConn the SYNC LoginModule::complete_login needs;
+# `tls-rustls` keeps us on the same rustls/ring TLS backend the rest of the plugin ecosystem pins
+# (no native-tls / openssl second stack). NOTE: this pulls a tokio runtime in transitively — see the
+# `// ABI GAP (async):` note in lib.rs about running blocking LDAP I/O inside the sync FFI call.
+ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }
+
+[dev-dependencies]
+serde_json = "1"
