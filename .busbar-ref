@@ -1,1 +1,1 @@
-83412dc0306dfe9fc7905249dccdcfd61d43e355 1.5.0  # PLACEHOLDER — bump to the busbar 1.5.2 core SHA once it lands on busbar dev; plugin CI cannot be green until the v2 auth ABI is on a fetchable ref (cut -f1/f2 read only sha+version, this trailing comment is ignored)
+5681d648292cdc72b17b2d51c1575c9894b337c1 1.5.2
