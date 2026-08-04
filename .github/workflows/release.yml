@@ -20,6 +20,7 @@ on:
   push:
     tags:
       - "v*"
+      - "!v*-*" # never publish on a -rc prerelease tag (qa staging marker)
 
 permissions:
   contents: write      # create the Release + upload assets
