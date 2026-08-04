@@ -171,7 +171,7 @@ fn userinfo_loopback_prefix_is_treated_as_remote() {
 fn insecure_transport_check_does_not_panic_on_multibyte_url() {
     let mut cfg = base_cfg();
     cfg.url = "ldap://é.example:389".to_string(); // 'é' (2 bytes) straddles index 7-8
-    // Must return a Result (reject as insecure), never panic.
+                                                  // Must return a Result (reject as insecure), never panic.
     assert!(
         LdapModule::new(cfg).is_err(),
         "a plaintext ldap:// to a non-loopback multibyte host must reject without panicking"

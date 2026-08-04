@@ -288,7 +288,10 @@ fn host_of(url: &str) -> &str {
     // Strip any userinfo: everything up to and including the LAST '@'. WITHOUT this, a URL like
     // `ldap://127.0.0.1:389@evil.com` reads as loopback here while ldap3 actually dials `evil.com`
     // in cleartext — a fail-OPEN bypass of the plaintext guard.
-    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     if let Some(rest) = hostport.strip_prefix('[') {
         // Bracketed IPv6 literal: the host is everything up to the closing bracket.
         if let Some(end) = rest.find(']') {
