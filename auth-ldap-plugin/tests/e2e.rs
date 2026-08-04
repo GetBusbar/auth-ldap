@@ -330,6 +330,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
             "listen: \"127.0.0.1:{data_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
              auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
+             \x20 admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 methods:\n    ldap:\n      browser_login: {{}}\n      url: \"{url}\"\n\
              \x20     bind_dn_template: \"uid={{username}},ou=people,dc=example,dc=org\"\n\
              \x20     base_dn: \"dc=example,dc=org\"\n      group_attr: \"seeAlso\"\n      role_from: cn\n\
@@ -349,6 +350,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         .env("BUSBAR_CONFIG", &config)
         .env("BUSBAR_PROVIDERS", &providers)
         .env("MOCK_KEY", "unused")
+        .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
         .env("BUSBAR_STATE_FILE", "")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
