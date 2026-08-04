@@ -15,4 +15,9 @@ jobs:
       plugin_crate: busbar-auth-ldap-plugin
       plugin_kind: auth
       plugin_alias: ldap
-      service: none
+      # OpenLDAP service container for the live credential-form e2e (tests/e2e.rs): the plugin binds
+      # alice against it, reads her group DN, mints a key; a wrong password is asserted 401.
+      service: openldap
+      # 1.5.2 auth ABI v2 + hosted GET /auth/token flow live on busbar `dev`, not yet `main` — build
+      # the sibling against dev so the plugin + its live e2e compile and run. Flip to main at 1.5.2 ship.
+      busbar_ref: dev

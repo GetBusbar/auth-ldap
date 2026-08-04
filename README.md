@@ -1,12 +1,16 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # busbar-auth-ldap — AD/LDAP auth module (1.5.2 LoginModule ABI stress-test)
 
-This repo is an AD/LDAP auth plugin for busbar **built as a design-validation exercise**: it stress-tests the
-1.5.2 `LoginModule` ABI (`crates/api/src/auth.rs` on `feat/1.5.2-token-exchange`) against the one auth flavor
-that exercises the **credential path** (username/password) **and opens its own socket** — unlike OIDC/GitHub,
-which are all redirect + core-executes-HTTP-hop. The **GAP LIST below is the primary deliverable**; the plugin
-is secondary and compiles against the committed ABI, stubbing at each ABI gap with an in-source `// ABI GAP:`
-marker.
+This repo is an AD/LDAP auth plugin for busbar. It **began as a design-validation exercise** that stress-tested
+the 1.5.2 `LoginModule` ABI (`crates/api/src/auth.rs`) against the one auth flavor that exercises the
+**credential path** (username/password) **and opens its own socket** — unlike OIDC/GitHub, which are all
+redirect + core-executes-HTTP-hop. The three blocking gaps it surfaced (**#1** credential form, **#2**
+redirect-vs-credential classification, **#3** password redaction) then **LANDED in the frozen auth ABI v2**, and
+this plugin now implements the **full LDAP credential flow** against it (`login_kind() = Credential`,
+`begin_login → Prompt(LoginForm{username,password})`, `complete_login` reads the `submitted` map, BINDs,
+`Identify`). The gap list below is kept as the record of that analysis, each blocking gap now annotated
+**✅ RESOLVED (v2)**; only the additive-later items (#4-async, #5, #6, #7) remain open, marked `// ABI GAP:`
+in-source.
 
 ## The intended LDAP flow
 
@@ -19,7 +23,9 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 
 ## GAP LIST (ranked)
 
-### 🔴 GAP #1 — No `LoginOutcome` variant to render a credential FORM  ·  **MUST FIX IN 1.5.2**
+### 🔴 GAP #1 — No `LoginOutcome` variant to render a credential FORM  ·  **✅ RESOLVED (v2)**
+> Landed as `LoginOutcome::Prompt(LoginForm{ fields: Vec<LoginField{ name, label, kind: FieldKind::{Text,Password}, required }> })` (+ wire mirror in `plugin-abi`). `begin_login` now returns `Prompt([username(Text), password(Password)])`; the core renders it and POSTs the values back. Original analysis below.
+
 - **What LDAP needs:** `begin_login` must tell the hosted login page to render a **username/password form** and
   POST it back to `/auth/token`. OIDC returns `LoginOutcome::Authorize(url)` and the page renders a *redirect
   button*; LDAP has no URL.
@@ -46,7 +52,9 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   Adding a variant later is a **breaking change** for every plugin/loader match arm. If credential login is a
   supported shape at all, the variant must exist before the ABI freezes. This is the single 1.5.2-blocking gap.
 
-### 🔴 GAP #2 — The chooser can't classify credential-vs-redirect, and the login-button config is OAuth-only  ·  **MUST FIX IN 1.5.2**
+### 🔴 GAP #2 — The chooser can't classify credential-vs-redirect, and the login-button config is OAuth-only  ·  **✅ RESOLVED (v2)**
+> Landed as `enum LoginKind { Redirect, Credential }` + a pure `fn login_kind(&self) -> LoginKind` (default `Redirect`) the chooser reads at load without side effects, plus `client_secret: Option<SecretRef>` (was required) validated per kind — `Credential` methods must have it ABSENT. LDAP returns `login_kind() = Credential` and carries no `client_secret`. Original analysis below.
+
 - **What LDAP needs:** with `oidc` (redirect) + `ldap` (credential) both configured, the chooser must know
   *before the user clicks* that ldap shows a **form** and oidc **redirects** — and it must be able to render an
   ldap button at all.
@@ -72,7 +80,9 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 - **Why 1.5.2:** making `client_secret` optional and adding the kind after the ABI freezes changes a required
   field and the login-config contract — both breaking for a released config schema.
 
-### 🟠 GAP #3 — The password crosses to the plugin with no redaction  ·  **SHOULD FIX IN 1.5.2 (cheap, structural asymmetry)**
+### 🟠 GAP #3 — The password crosses to the plugin with no redaction  ·  **✅ RESOLVED (v2)**
+> Landed as `CompleteLogin.submitted: Vec<(String, Redacted<String>)>` (subsuming the old ad-hoc `username`/`password`). Values ride `Redacted` (Debug/Display print `***`, `Zeroize` on drop) on the engine side; the plugin exposes them via `expose_secret()` only at the single documented `complete_login` boundary for the bind. Original analysis below.
+
 - **What LDAP needs:** the password *must* cross to the plugin (only the plugin can BIND). It must not be
   loggable or leak into the error/out channel.
 - **Why the ABI can't express it:** the ABI is deliberately asymmetric — OIDC's `client_secret` is
@@ -136,9 +146,10 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 ---
 
 ## What the ABI got RIGHT for LDAP (fits cleanly)
-- **`CompleteLogin.username` + `password` already exist** — the direct-credential shape was anticipated. Once a
-  form path delivers them (GAP #1), `complete_login` receives them with zero ABI friction. This is the single
-  biggest "it fits" — someone left the credential slots in.
+- **The generic `submitted: Vec<(String, Redacted<String>)>` map** (v2, subsuming the old ad-hoc
+  `username`/`password`) delivers the form values keyed by the field `name` the plugin declared in `Prompt` —
+  `complete_login` reads `submitted["username"]`/`submitted["password"]` with zero ABI friction, and a future
+  method declaring `[username, password, totp]` just works.
 - **`Identify(Principal{ id, roles, ttl_secs })`** maps to LDAP 1:1: `id = "ldap:<uid>"`, `roles = groups`,
   `ttl_secs` for the identity cache. `Identity ↔ Principal` (`groups ↔ roles`) is lossless.
 - **`cacheable() = true`** is exactly the documented "real I/O per call" case — the engine caches the identity.
@@ -147,24 +158,28 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 - **`authenticate` → `Pass`** cleanly models "LDAP is a login method, not a data-plane bearer verifier" — it
   defers and the chain continues.
 
-## The prototype
-- **Compiles** against the committed ABI (`cargo build` green; path-deps into `busbarAI @
-  feat/1.5.2-token-exchange`). Two-crate layout mirroring `auth-oidc`: `busbar-auth-ldap` (logic) +
-  `busbar-auth-ldap-plugin` (cdylib, `export_login_plugin!`).
+## The plugin (implemented against frozen auth ABI v2)
+- **Compiles + gate-green** against the frozen v2 ABI (`cargo build` / `test` / `clippy -D warnings` /
+  `fmt --check`; path-deps into the `busbarAI` core checkout). Two-crate layout mirroring `auth-oidc`:
+  `busbar-auth-ldap` (logic) + `busbar-auth-ldap-plugin` (cdylib, `export_login_plugin!`). Manifest
+  `abi_version = 2`.
+- **Full credential flow:** `login_kind() = Credential`; `begin_login → Prompt(LoginForm{ username(Text),
+  password(Password) })`; `complete_login` reads the `submitted` map (`Redacted` values, exposed only for the
+  bind), opens its OWN LDAP socket, BINDs, reads groups, `Identify`. No `client_secret` (structurally absent).
 - **Real LDAP BIND + group read** via `ldap3` (sync, rustls TLS), incl. direct-bind and search-then-bind,
   LDAPS/STARTTLS, and DN→role mapping.
-- **Stubbed at the ABI gap:** `begin_login` fails closed (GAP #1 — no `Prompt` variant). Every gap is an
-  in-source `// ABI GAP:` comment.
-- **Tests: 20 passing** (16 lib + 4 plugin). Cover config parse + `deny_unknown_fields`, bind-DN templating +
-  **LDAP-injection rejection**, RFC4515 filter escaping, group-DN → role mapping (CN/DN, dedup, escaped commas),
-  the `authenticate` defer, `begin_login` fail-closed (pins GAP #1), `complete_login` credential guards, and
-  evidence of the un-redacted password `Debug` (GAP #3). The live-bind happy path is integration-only.
+- **Remaining `// ABI GAP:` markers** are the additive-later items only (#5 secret-ref for the service-account
+  password; #4-async sync/blocking I/O).
+- **Tests: 22 passing** (18 lib + 4 plugin). Cover config parse + `deny_unknown_fields` incl. **client_secret
+  rejected**, bind-DN templating + **LDAP-injection rejection**, RFC4515 filter escaping, group-DN → role
+  mapping (CN/DN, dedup, escaped commas), the `authenticate` defer, `login_kind() = Credential`, the
+  `begin_login` `Prompt` form shape, the `submitted`-map field parsing (+ `Redacted` never leaks in `Debug`),
+  and `complete_login` credential guards (missing/empty). The live-bind happy path is integration-only.
 
 ## Recommendation
-**LDAP reveals a genuine 1.5.2-blocking ABI gap. Do not freeze the ABI without addressing GAP #1 and GAP #2.**
-Both require **breaking changes** to frozen public types (`LoginOutcome` variant; `BrowserLoginCfg`
-required-field + kind), so they *must* land before the freeze if credential-style login is ever to be
-supported. GAP #3 (password redaction) is cheap and structural and **should** ride along. GAP #4-async, #5-secret-ref,
-#6, #7 are all **additive-later** and do not block 1.5.2. The credential *transport* (`CompleteLogin`
-username/password → `Identify`) and the plugin-opens-socket model both already fit — the gaps are entirely on
-the **begin/chooser (form-collection) side**, exactly the surface OIDC's redirect flow never exercised.
+**The three 1.5.2-blocking gaps LDAP surfaced (#1 credential form, #2 redirect-vs-credential classification, #3
+password redaction) all landed in the frozen auth ABI v2** — `LoginOutcome::Prompt(LoginForm)`, a pure
+`login_kind()` classifier with `client_secret` made `Optional` + per-kind validated, and the generic
+`submitted: Vec<(String, Redacted<String>)>` transport. This plugin now implements the full flow against them
+with zero remaining blockers. GAP #4-async, #5-secret-ref, #6, #7 stay **additive-later** and do not block the
+freeze.

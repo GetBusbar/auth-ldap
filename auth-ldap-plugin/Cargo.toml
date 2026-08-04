@@ -16,3 +16,14 @@ busbar-api = { path = "../../busbarAI/crates/api" }
 busbar-plugin-sdk = { path = "../../busbarAI/crates/plugin-sdk" }
 busbar-auth-ldap = { path = "../auth-ldap" }
 serde_json = "1"
+
+[dev-dependencies]
+# Dev-only, for the live plugin-side e2e (tests/e2e.rs): locate the built cdylib (plugin-loader's
+# filename helper), pack it with the real busbar-plugin-pack BINARY (spawned), drive real blocking HTTP
+# against a spawned real busbar binary + an OpenLDAP service container, and SEED that directory over
+# LDAP (ldap3, the same client the plugin uses — sync + tls-rustls, matching the plugin's own feature
+# set). INTERIM local path deps into the sibling busbarAI checkout, same rationale as the runtime deps.
+busbar-plugin-loader = { path = "../../busbarAI/crates/plugin-loader" }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }

@@ -16,12 +16,17 @@
 //! full DN. This is a normalization decision the ABI pushes entirely onto the plugin — additive to
 //! fix later (an engine-side DN-normalizing role mapper), not a 1.5.2 blocker.
 
+use std::collections::HashSet;
+
 use crate::RoleFrom;
 
 /// Map the raw group-membership DN values off the directory to [`crate::Principal`] role strings,
 /// honoring [`RoleFrom`], de-duplicated and order-preserving.
 pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(group_dns.len());
+    // HashSet-backed dedup so a hostile/huge memberOf is O(n) rather than O(n^2) `Vec::contains`;
+    // `out` still preserves first-seen order (we only push on a fresh insert).
+    let mut seen: HashSet<String> = HashSet::with_capacity(group_dns.len());
     for dn in group_dns {
         let role = match mode {
             RoleFrom::Cn => match first_cn(dn) {
@@ -32,7 +37,7 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
             },
             RoleFrom::Dn => dn.trim().to_lowercase(),
         };
-        if !role.is_empty() && !out.contains(&role) {
+        if !role.is_empty() && seen.insert(role.clone()) {
             out.push(role);
         }
     }
@@ -42,7 +47,7 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
 /// Extract the value of the first `CN=` RDN of a DN, unescaping the handful of DN escapes we care
 /// about (`\,` `\=` `\+`). Case-insensitive on the `CN` attribute name (LDAP is). Returns `None` if
 /// there is no CN component.
-pub fn first_cn(dn: &str) -> Option<String> {
+pub(crate) fn first_cn(dn: &str) -> Option<String> {
     for rdn in split_dn_rdns(dn) {
         let (attr, val) = rdn.split_once('=')?;
         if attr.trim().eq_ignore_ascii_case("cn") {
@@ -79,20 +84,56 @@ fn split_dn_rdns(dn: &str) -> Vec<String> {
     parts
 }
 
-/// Unescape the DN-value escapes that survive [`split_dn_rdns`] (`\,` `\=` `\+` `\\` and `\<hex>`
-/// left as-is beyond the common cases).
+/// Unescape the DN-value escapes that survive [`split_dn_rdns`], per RFC 4514:
+///   - the single-char escape `\c` (e.g. `\,` `\=` `\+` `\\` `\"`) yields the literal char `c`, and
+///   - the hex-pair escape `\XX` yields the raw byte `0xXX`.
+///
+/// Consecutive `\XX` bytes are buffered and decoded together as UTF-8, so a multi-byte character
+/// encoded as several hex escapes (e.g. `\C3\A9` → `é`) round-trips correctly.
 fn unescape_rdn_value(v: &str) -> String {
+    let bytes = v.as_bytes();
     let mut out = String::with_capacity(v.len());
-    let mut chars = v.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(n) = chars.next() {
-                out.push(n);
+    // Buffer of hex-escaped raw bytes awaiting a UTF-8 decode; flushed before any literal text.
+    let mut pending: Vec<u8> = Vec::new();
+    macro_rules! flush {
+        () => {
+            if !pending.is_empty() {
+                out.push_str(&String::from_utf8_lossy(&pending));
+                pending.clear();
             }
+        };
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16));
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                // `\XX` hex-pair form — a raw byte, buffered for a joint UTF-8 decode.
+                pending.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+            // `\c` single-char escape — copy the escaped character verbatim (may be multi-byte).
+            flush!();
+            if let Some(ch) = v[i + 1..].chars().next() {
+                out.push(ch);
+                i += 1 + ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        // Ordinary character.
+        flush!();
+        if let Some(ch) = v[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
         } else {
-            out.push(c);
+            i += 1;
         }
     }
+    flush!();
     out
 }
 

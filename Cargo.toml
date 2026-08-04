@@ -9,10 +9,13 @@
 # Only busbar-api / busbar-plugin-sdk (and the plugin's dev-deps: busbar-plugin-loader/abi) reach into
 # a sibling busbarAI checkout — INTERIM local path deps, same pattern as auth-oidc / hashicorp-vault.
 #
-# NOTE (design-validation build): this crate is a STRESS TEST of the 1.5.2 LoginModule ABI. Points
-# where the ABI cannot express what an LDAP credential flow needs are marked `// ABI GAP:` in-source
-# and catalogued in README.md. It compiles against the committed ABI; the begin_login form-prompt
-# path is stubbed at the ABI gap (there is no LoginOutcome variant for "collect credentials").
+# NOTE: this crate began as a STRESS TEST of the 1.5.2 LoginModule ABI; the credential-flow gaps it
+# surfaced (LoginKind classification, LoginOutcome::Prompt(LoginForm), the generic submitted map with
+# Redacted values, client_secret made Optional) then LANDED in the frozen auth ABI v2. It now
+# implements the full LDAP credential flow against that v2 ABI: login_kind()=Credential, begin_login
+# returns Prompt(LoginForm{username,password}), and complete_login reads the submitted map, BINDs, and
+# Identifies. Remaining `// ABI GAP:` markers are the additive-later items only (secret-ref for the
+# service-account password, sync/blocking I/O), catalogued in README.md.
 [workspace]
 resolver = "2"
 members = [

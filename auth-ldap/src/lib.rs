@@ -14,25 +14,64 @@
 //!    and returns [`busbar_api::LoginOutcome::Identify`] with a [`Principal`] whose `roles` are the
 //!    group names, mapped to policy downstream by the operator's `auth.role_bindings.ldap`.
 //!
-//! ## ABI stress-test status (this is a design-validation prototype)
+//! ## Auth ABI v2 (1.5.2 credential flow) — the LDAP method, fully expressed
 //!
-//! This crate is a probe of the 1.5.2 `LoginModule` ABI. Every place the ABI cannot express the
-//! LDAP credential flow is marked with an `// ABI GAP:` comment and catalogued in the repo README.
-//! The credential-carrying half ([`CompleteLogin::username`]/`password` → `Identify`) fits the ABI
-//! cleanly; the FORM-PROMPT half ([`begin_login`](LdapModule::begin_login)) does NOT — there is no
-//! `LoginOutcome` variant that says "render a username/password form and POST it back", so that path
-//! is stubbed at the gap.
+//! This crate was born as a stress-test of the 1.5.2 `LoginModule` ABI; the gaps it surfaced were
+//! then landed in the frozen v2 ABI, and this module is now a real, complete credential-flow plugin:
+//!
+//! - [`login_kind`](LdapModule::login_kind) declares [`LoginKind::Credential`] so the chooser renders
+//!   a form (not a redirect button) WITHOUT any side-effecting `begin_login` call.
+//! - [`begin_login`](LdapModule::begin_login) returns [`LoginOutcome::Prompt`] with a declarative
+//!   [`LoginForm`] (`username` Text + `password` Password) for the core to render.
+//! - [`complete_login`](LdapModule::complete_login) reads the submitted values back by the field
+//!   `name` it declared (via [`CompleteLogin::submitted`], the one documented plaintext boundary),
+//!   opens its OWN LDAP socket, BINDs, reads groups, and returns `Identify`.
+//! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
+//!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
 use busbar_api::{
-    AuthModule, AuthOutcome, BeginLogin, CompleteLogin, LoginModule, LoginOutcome, Principal,
+    AuthModule, AuthOutcome, BeginLogin, CompleteLogin, FieldKind, LoginField, LoginForm,
+    LoginKind, LoginModule, LoginOutcome, Principal,
 };
+use core::fmt;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub mod groups;
 
 #[cfg(test)]
 mod tests;
+
+/// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
+/// directory could list an unbounded number of groups; collection is capped here to bound memory.
+/// 4096 is far above any real-world group membership; the module logs when it truncates.
+const MAX_GROUP_VALUES: usize = 4096;
+
+/// A secret string that NEVER reveals itself through `Debug`/`Display`.
+///
+/// The service-account bind password used to be a bare `String` on the `#[derive(Debug)]`
+/// [`LdapConfig`], so — unlike the end-user password, which rides `Redacted` across the wire — it
+/// could leak into a log line, a `tracing` field, or a panic/`{:?}` dump. Wrapping it makes the
+/// redaction STRUCTURAL. `#[serde(transparent)]` keeps deserialization identical (a plain JSON
+/// string), and the plaintext is reachable only through the explicit [`SecretString::expose`] audit
+/// point.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct SecretString(String);
+
+impl SecretString {
+    /// Borrow the underlying secret. AUDIT POINT — the one place the plaintext escapes redaction.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
 
 /// How a group DN read from the directory becomes a [`Principal`] role string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -98,16 +137,26 @@ pub struct LdapConfig {
     /// bind-service password would arrive as plaintext in the opaque settings blob (no core-side
     /// secret resolution for plugin-opened connections). See README gap #5.
     #[serde(default)]
-    pub bind_service_password: Option<String>,
+    pub bind_service_password: Option<SecretString>,
 
-    /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). Fits in opaque settings — NOT an
-    /// ABI gap. (Mirrors auth-oidc's `ca_cert_pem`.)
+    /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). Deserialized for forward
+    /// compatibility, but the custom-CA TLS wiring is NOT implemented — [`LdapModule::new`] rejects a
+    /// config that sets it (fail-closed) rather than silently ignoring it and lulling an operator into
+    /// believing a private CA is trusted when it is not.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 
     /// Use STARTTLS over an `ldap://` connection instead of implicit LDAPS.
     #[serde(default)]
     pub start_tls: bool,
+
+    /// Escape hatch for the plaintext-transport guard. By default a plaintext `ldap://` URL to a
+    /// NON-loopback host with no STARTTLS is REJECTED at config time, because it would send the
+    /// service-account AND every end-user password across the network in cleartext. Set this to
+    /// `true` to knowingly override that guard (e.g. a trusted, isolated network segment). It does
+    /// nothing for `ldaps://`, for STARTTLS, or for a loopback host — those are already secure/local.
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
 
     /// Connect/operation timeout (seconds). Default 10.
     #[serde(default = "default_timeout_secs")]
@@ -140,6 +189,15 @@ impl LdapModule {
     /// Build the module from parsed config. Validates the DN template references `{username}` so a
     /// misconfiguration fails at boot, not on the first login.
     pub fn new(cfg: LdapConfig) -> Result<Self, String> {
+        // Fail CLOSED on an unsupported CA bundle: `ca_cert_pem` is documented as "a CA bundle to
+        // trust" but the custom-CA TLS path is not wired. Accepting-and-ignoring it would silently
+        // fall back to the system trust roots while the operator believes their private CA is in use.
+        if cfg.ca_cert_pem.is_some() {
+            return Err(
+                "ldap ca_cert_pem is not yet supported; omit it or use a system-trusted cert"
+                    .to_string(),
+            );
+        }
         if !cfg.bind_dn_template.contains("{username}") {
             return Err(
                 "ldap bind_dn_template must contain the `{username}` placeholder".to_string(),
@@ -157,16 +215,95 @@ impl LdapModule {
                         .to_string(),
                 );
             }
+            // A service DN with NO password — or a present-but-EMPTY one — would perform
+            // `simple_bind(dn, "")`, an UNAUTHENTICATED bind on most directories. Require a
+            // NON-EMPTY password so search-then-bind is always authenticated.
+            match cfg.bind_service_password.as_ref() {
+                None => {
+                    return Err(
+                        "ldap user_search_filter requires bind_service_password for \
+                         search-then-bind (a missing password becomes an unauthenticated bind)"
+                            .to_string(),
+                    );
+                }
+                Some(pw) if pw.expose().is_empty() => {
+                    return Err(
+                        "ldap bind_service_password must not be empty (an empty password becomes \
+                         an unauthenticated bind for search-then-bind)"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+        // Fail CLOSED on a plaintext transport that would expose credentials on the network: a
+        // `ldap://` URL (not `ldaps://`) with no STARTTLS, to a non-loopback host, sends the
+        // service-account AND every end-user password in cleartext. Reject unless the operator
+        // explicitly opts out. `ldaps://`, STARTTLS, or a loopback host are already secure/local.
+        if is_insecure_transport(&cfg.url, cfg.start_tls) && !cfg.allow_insecure_transport {
+            return Err(format!(
+                "ldap url {:?} uses plaintext ldap:// to a non-loopback host with no STARTTLS, \
+                 which sends the service and end-user credentials in cleartext; use an ldaps:// \
+                 URL, set start_tls = true, or (to knowingly override) set \
+                 allow_insecure_transport = true",
+                cfg.url
+            ));
         }
         Ok(Self { cfg })
     }
 
     /// Expand `bind_dn_template` with a validated username. Returns `Err` if the username contains
     /// characters that would break out of a DN component (LDAP injection defense).
-    pub fn bind_dn_for(&self, username: &str) -> Result<String, String> {
+    pub(crate) fn bind_dn_for(&self, username: &str) -> Result<String, String> {
         let safe = groups::validate_username(username)?;
         Ok(self.cfg.bind_dn_template.replace("{username}", safe))
     }
+}
+
+/// Would binding over this URL send credentials in CLEARTEXT on the network? True only for a
+/// plaintext `ldap://` scheme (not `ldaps://`), with STARTTLS off, to a NON-loopback host. `ldaps://`
+/// is implicit TLS; STARTTLS upgrades the `ldap://` socket; a loopback host never leaves the box.
+fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
+    let url = url.trim();
+    // Implicit LDAPS is already encrypted. Compare on BYTES (not `url[..8]`, which panics if a
+    // multi-byte UTF-8 char straddles byte index 8) — the scheme is ASCII, so a byte compare is exact.
+    if url.len() >= 8 && url.as_bytes()[..8].eq_ignore_ascii_case(b"ldaps://") {
+        return false;
+    }
+    // STARTTLS upgrades the plaintext socket to TLS before any bind.
+    if start_tls {
+        return false;
+    }
+    // Anything else here is a plaintext `ldap://` (or scheme-less) connection: only safe to a
+    // loopback host, which never puts the credential on the wire.
+    !is_loopback_host(host_of(url))
+}
+
+/// Extract the host from an `ldap://host:port` / `ldaps://host:port` URL, tolerating an `[::1]`
+/// bracketed IPv6 literal and an absent scheme. Returns the raw host with no port or path.
+fn host_of(url: &str) -> &str {
+    let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    // The authority ends at the first '/' (path).
+    let authority = after.split('/').next().unwrap_or("");
+    // Strip any userinfo: everything up to and including the LAST '@'. WITHOUT this, a URL like
+    // `ldap://127.0.0.1:389@evil.com` reads as loopback here while ldap3 actually dials `evil.com`
+    // in cleartext — a fail-OPEN bypass of the plaintext guard.
+    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if let Some(rest) = hostport.strip_prefix('[') {
+        // Bracketed IPv6 literal: the host is everything up to the closing bracket.
+        if let Some(end) = rest.find(']') {
+            return &rest[..end];
+        }
+    }
+    // Otherwise the host ends at the first ':' (port).
+    hostport.split(':').next().unwrap_or("")
+}
+
+/// Is this host a loopback address that never leaves the machine? Matches the canonical trio only —
+/// `127.0.0.1`, `::1`, `localhost` — case-insensitively.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 impl AuthModule for LdapModule {
@@ -187,53 +324,62 @@ impl AuthModule for LdapModule {
     }
 }
 
+/// Look up a submitted credential field by the `name` the plugin declared in its [`LoginForm`].
+/// This is the ONE place the [`Redacted`](busbar_api::Redacted) value is exposed as plaintext — the
+/// documented `complete_login` credential boundary (only the plugin can perform the bind). Callers
+/// must NOT log the result.
+fn submitted_field<'a>(req: &'a CompleteLogin, name: &str) -> Option<&'a str> {
+    req.submitted
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.expose_secret().as_str())
+}
+
 impl LoginModule for LdapModule {
-    /// Start browser login.
-    ///
-    /// ABI GAP #1 (THE blocking gap): OIDC returns `LoginOutcome::Authorize(url)` and the login page
-    /// renders a redirect button. LDAP has NO URL to redirect to — it needs the page to render a
-    /// USERNAME/PASSWORD FORM and POST it back to `/auth/token`. `LoginOutcome` has exactly four
-    /// variants — `Authorize(String)`, `Exchange(LoginHop)`, `Identify(Principal)`, `Reject` — and
-    /// NONE of them can say "collect these credentials from the browser and return them to me". The
-    /// core's fail-closed mapping (`map_begin_login`) turns anything that isn't `AuthorizeUrl` into
-    /// `Reject`, so even if we returned `Identify` here it would be dropped. There is therefore no way
-    /// for begin_login to drive a credential form, and we fail closed.
-    ///
-    /// PROPOSED FIX (must land in 1.5.2, before the ABI freezes — see README): add
-    ///
-    /// ```ignore
-    /// pub struct LoginField { pub key: String, pub label: String, pub secret: bool }
-    /// // in enum LoginOutcome:
-    /// Prompt(Vec<LoginField>),   // "render this form; POST the values back to /auth/token"
-    /// ```
-    ///
-    /// The login page renders `Prompt(fields)` as a form (a `secret: true` field → `<input
-    /// type=password>`), and the POST feeds the collected values back into `complete_login` (which for
-    /// LDAP already has the `username`/`password` slots to receive them). Below we stub at the gap.
-    fn begin_login(&self, _req: &BeginLogin) -> LoginOutcome {
-        // ABI GAP #1: no `LoginOutcome::Prompt(Vec<LoginField>)` to request a credential form.
-        // Fail closed — begin_login cannot express LDAP's form-collect step on the committed ABI.
-        LoginOutcome::Reject
+    /// LDAP is a direct-credential (form) method, not a redirect: the chooser reads this ONCE at load
+    /// to render a username/password form instead of a redirect button — no side-effecting
+    /// `begin_login` call, no PKCE state minted.
+    fn login_kind(&self) -> LoginKind {
+        LoginKind::Credential
     }
 
-    /// Handle the credential POST: BIND with the supplied username/password, read groups, `Identify`.
+    /// Start browser login. LDAP has no external authorize URL — it returns a declarative
+    /// [`LoginForm`] the core renders as a form and POSTs back. The fields are generic (the core
+    /// renders whatever the plugin declares): `username` (Text) + `password` (Password, masked +
+    /// carried [`Redacted`](busbar_api::Redacted) on the wire). No PKCE/redirect is used.
+    fn begin_login(&self, _req: &BeginLogin) -> LoginOutcome {
+        LoginOutcome::Prompt(LoginForm {
+            fields: vec![
+                LoginField {
+                    name: "username".to_string(),
+                    label: "Username".to_string(),
+                    kind: FieldKind::Text,
+                    required: true,
+                },
+                LoginField {
+                    name: "password".to_string(),
+                    label: "Password".to_string(),
+                    kind: FieldKind::Password,
+                    required: true,
+                },
+            ],
+        })
+    }
+
+    /// Handle the credential POST: read the submitted `username`/`password` (keyed by the field names
+    /// declared in [`begin_login`](Self::begin_login)), BIND against the directory, read groups,
+    /// `Identify`.
     ///
-    /// This is the half of the ABI that fits LDAP: [`CompleteLogin`] already carries `username` +
-    /// `password` (the direct-credential shape), so once the (missing) form path delivers them, this
-    /// method does the real work. It opens its OWN LDAP socket here — the loader runs this in-process
-    /// with no sandbox (verified: same six-symbol dlopen path as store/secret/vault plugins), so a
-    /// plugin-opened socket is allowed. See the two remaining gaps flagged inline.
+    /// It opens its OWN LDAP socket here — the loader runs this in-process with no sandbox (same
+    /// six-symbol dlopen path as store/secret/vault plugins), so a plugin-opened socket is allowed.
+    /// The password crosses as a [`Redacted`](busbar_api::Redacted) value on the engine side and is
+    /// exposed only via [`submitted_field`] for the bind; we never log `req` or the exposed values.
     fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
-        // ABI GAP #3 (credential transport / redaction): `req` (and the wire `CompleteLoginRequest`,
-        // and `AuthRequest::CompleteLogin`) all derive `Debug`, so `{:?}` on any of them prints the
-        // PASSWORD in the clear. OIDC's `client_secret` is structurally kept off the plugin; the LDAP
-        // password has to cross to the plugin (only the plugin can bind), and nothing in the ABI
-        // redacts it. We must NOT log `req`. There is no `Secret`/redacting wrapper on the
-        // password field. See README gap #3.
-        let (Some(username), Some(password)) = (req.username.as_deref(), req.password.as_deref())
-        else {
-            // No credentials on this call. On the committed ABI this is indistinguishable from the
-            // OIDC "no token response yet" first hop — but LDAP has no hop, so absent creds = reject.
+        let (Some(username), Some(password)) = (
+            submitted_field(req, "username"),
+            submitted_field(req, "password"),
+        ) else {
+            // No credentials submitted on this call — nothing to bind. Fail closed.
             return LoginOutcome::Reject;
         };
         if password.is_empty() {
@@ -275,79 +421,241 @@ enum BindError {
     Directory(String),
 }
 
+/// Scope of an [`LdapBackend::search`] — the two the module uses.
+#[derive(Clone, Copy)]
+pub(crate) enum SearchScope {
+    /// The entry named by `base` itself (used for the group read).
+    Base,
+    /// The whole subtree under `base` (used for the search-then-bind user lookup).
+    Subtree,
+}
+
+/// A directory entry reduced to what the module reads: its DN and requested attributes.
+#[derive(Clone, Default)]
+pub(crate) struct DirEntry {
+    pub dn: String,
+    pub attrs: HashMap<String, Vec<String>>,
+}
+
+/// The minimal LDAP operations [`LdapModule::bind_and_identify_on`] needs, abstracted behind a trait
+/// so the post-connect bind logic (result-code handling, ambiguity, group cap, roles, principal id)
+/// is UNIT-TESTABLE against a fake in-memory directory. The production impl ([`RealLdap`]) drives an
+/// `ldap3::LdapConn`; tests drive a fake.
+pub(crate) trait LdapBackend {
+    /// Bind with the given DN + password. `Ok(rc)` is the LDAP result code (0 = success, e.g. 49 =
+    /// invalidCredentials); `Err` is an operational/transport failure (connect/TLS/timeout), NOT a
+    /// statement about the credential's validity.
+    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, String>;
+
+    /// Run a search and return the matched entries. `Err` is an operational failure (which includes a
+    /// non-success result code).
+    fn search(
+        &mut self,
+        base: &str,
+        scope: SearchScope,
+        filter: &str,
+        attrs: &[&str],
+    ) -> Result<Vec<DirEntry>, String>;
+
+    /// Best-effort unbind/close of the connection.
+    fn unbind(&mut self);
+}
+
+/// The production [`LdapBackend`]: a real `ldap3::LdapConn` plus the configured per-operation timeout,
+/// re-applied before EVERY operation (`with_timeout` is consumed per-op) so a hung directory cannot
+/// block a login indefinitely — the connect timeout alone does not bound the bind/search operations.
+struct RealLdap {
+    conn: ldap3::LdapConn,
+    timeout: Duration,
+}
+
+impl LdapBackend for RealLdap {
+    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, String> {
+        self.conn.with_timeout(self.timeout);
+        let r = self
+            .conn
+            .simple_bind(dn, password)
+            .map_err(|e| e.to_string())?;
+        Ok(r.rc)
+    }
+
+    fn search(
+        &mut self,
+        base: &str,
+        scope: SearchScope,
+        filter: &str,
+        attrs: &[&str],
+    ) -> Result<Vec<DirEntry>, String> {
+        use ldap3::{Scope, SearchEntry};
+        let scope = match scope {
+            SearchScope::Base => Scope::Base,
+            SearchScope::Subtree => Scope::Subtree,
+        };
+        self.conn.with_timeout(self.timeout);
+        let (rs, _res) = self
+            .conn
+            .search(base, scope, filter, attrs.to_vec())
+            .and_then(|r| r.success())
+            .map_err(|e| e.to_string())?;
+        Ok(rs
+            .into_iter()
+            .map(|e| {
+                let e = SearchEntry::construct(e);
+                DirEntry {
+                    dn: e.dn,
+                    attrs: e.attrs,
+                }
+            })
+            .collect())
+    }
+
+    fn unbind(&mut self) {
+        let _ = self.conn.unbind();
+    }
+}
+
+/// Build the STABLE principal id from the resolved bind DN. The submitted username is user-controlled
+/// in its CASING (`Alice`/`alice`) and form (`DOMAIN\alice`); using it raw would mint DIFFERENT
+/// identities — and duplicate self-serve keys — for the SAME person. LDAP DNs are case-insensitive,
+/// so we key identity on the resolved DN lowercased: exactly one canonical `ldap:<dn>` per directory
+/// identity, in both direct-template and search-then-bind modes. Lowercasing is Unicode-aware
+/// (`to_lowercase`, not `to_ascii_lowercase`) — `validate_username` allows non-ASCII names, so an
+/// ASCII-only fold would mint two distinct principals for two casings of a non-ASCII username.
+fn principal_id(user_dn: &str) -> String {
+    format!("ldap:{}", user_dn.to_lowercase())
+}
+
 impl LdapModule {
     /// Open a socket to the directory, BIND with the credentials, read the user's groups, and build a
     /// [`Principal`]. This is the plugin-opens-its-own-socket path (like `hashicorp-vault`).
     ///
-    /// Split out from the trait method so the trait method stays a thin ABI-shaped wrapper and this
-    /// carries the real LDAP logic. Not exercised by unit tests (needs a live directory); the pure
-    /// helpers it calls (`bind_dn_for`, group DN → role mapping, username validation) ARE unit-tested.
+    /// A thin wrapper: it constructs the real [`RealLdap`] backend (TLS settings, connect + operation
+    /// timeout) and delegates the actual bind/search/group logic to [`Self::bind_and_identify_on`],
+    /// which is generic over [`LdapBackend`] and fully unit-tested against a fake directory.
     fn bind_and_identify(&self, username: &str, password: &str) -> Result<Principal, BindError> {
-        use ldap3::{LdapConn, LdapConnSettings, Scope, SearchEntry};
+        use ldap3::{LdapConn, LdapConnSettings};
 
-        // TLS settings. Custom-CA injection (ca_cert_pem) for ldap3's rustls backend would be wired
-        // through LdapConnSettings here; the plaintext/default-roots path is implemented, and the
-        // custom-CA path is a plugin-impl detail (fits opaque settings — NOT an ABI gap).
+        // TLS/connect settings. `set_conn_timeout` bounds the CONNECT; the per-operation timeout is
+        // re-applied inside `RealLdap` before each bind/search. (Custom-CA `ca_cert_pem` is rejected
+        // at config time — see `LdapModule::new` — so only system-trusted roots are in play here.)
         let mut settings = LdapConnSettings::new().set_conn_timeout(self.cfg.timeout());
         if self.cfg.start_tls {
             settings = settings.set_starttls(true);
         }
 
-        let mut ldap = LdapConn::with_settings(settings, &self.cfg.url)
+        let conn = LdapConn::with_settings(settings, &self.cfg.url)
             .map_err(|e| BindError::Directory(format!("connect {}: {e}", self.cfg.url)))?;
+        let mut backend = RealLdap {
+            conn,
+            timeout: self.cfg.timeout(),
+        };
+        self.bind_and_identify_on(&mut backend, username, password)
+    }
 
+    /// The post-connect bind/search/group logic, generic over [`LdapBackend`] so the reject paths are
+    /// unit-testable. Resolves the bind DN (search-then-bind or direct template), rejects a non-zero
+    /// user-bind result code, rejects an empty or AMBIGUOUS (>1 match) search, CAPS the number of
+    /// group values read, and builds a stable, normalized principal id.
+    fn bind_and_identify_on<B: LdapBackend>(
+        &self,
+        ldap: &mut B,
+        username: &str,
+        password: &str,
+    ) -> Result<Principal, BindError> {
         // Resolve the DN to bind as: either search-then-bind, or the direct template.
         let user_dn = if let Some(filter_tpl) = &self.cfg.user_search_filter {
+            // The direct-template path runs the username through `validate_username` (which rejects
+            // an empty username); the search path must guard it too — an empty username has no
+            // identity to resolve. Fail as invalid credentials, never reach the socket.
+            if username.is_empty() {
+                return Err(BindError::InvalidCredentials);
+            }
             // Search-then-bind: bind as the service account, find the user entry, take its DN.
+            // `new()` guarantees both bind_service_dn and bind_service_password are present here.
             let svc_dn = self.cfg.bind_service_dn.as_deref().unwrap_or("");
-            let svc_pw = self.cfg.bind_service_password.as_deref().unwrap_or("");
-            ldap.simple_bind(svc_dn, svc_pw)
-                .and_then(|r| r.success())
+            let svc_pw = self
+                .cfg
+                .bind_service_password
+                .as_ref()
+                .map(SecretString::expose)
+                .unwrap_or("");
+            let rc = ldap
+                .simple_bind(svc_dn, svc_pw)
                 .map_err(|e| BindError::Directory(format!("service bind: {e}")))?;
+            if rc != 0 {
+                return Err(BindError::Directory(format!(
+                    "service bind rejected (rc={rc})"
+                )));
+            }
             let filter = filter_tpl.replace("{username}", groups::escape_filter(username).as_str());
-            let (rs, _res) = ldap
-                .search(&self.cfg.base_dn, Scope::Subtree, &filter, vec!["dn"])
-                .and_then(|r| r.success())
+            let entries = ldap
+                .search(&self.cfg.base_dn, SearchScope::Subtree, &filter, &["dn"])
                 .map_err(|e| BindError::Directory(format!("user search: {e}")))?;
-            let entry = rs.into_iter().next().ok_or(BindError::InvalidCredentials)?;
-            SearchEntry::construct(entry).dn
+            // Ambiguous: more than one entry matched. Fail CLOSED rather than silently binding the
+            // first — we cannot establish a single, unambiguous identity for the credential.
+            if entries.len() > 1 {
+                tracing::warn!(
+                    module = "ldap",
+                    matches = entries.len(),
+                    "ldap user_search_filter matched multiple entries; rejecting as ambiguous"
+                );
+                return Err(BindError::InvalidCredentials);
+            }
+            let entry = entries
+                .into_iter()
+                .next()
+                .ok_or(BindError::InvalidCredentials)?;
+            // Guard an empty resolved DN before binding: `simple_bind("", password)` is an anonymous
+            // bind on many directories and would "succeed" without authenticating anyone.
+            if entry.dn.is_empty() {
+                return Err(BindError::InvalidCredentials);
+            }
+            entry.dn
         } else {
             self.bind_dn_for(username)
                 .map_err(|_| BindError::InvalidCredentials)?
         };
 
-        // The credential check: BIND as the user with the presented password. LDAP result code 49
-        // (invalidCredentials) surfaces as a non-success rc → InvalidCredentials.
-        let bind = ldap
+        // The credential check: BIND as the user with the presented password. A non-zero result code
+        // (e.g. 49 invalidCredentials) is a credential rejection.
+        let rc = ldap
             .simple_bind(&user_dn, password)
             .map_err(|e| BindError::Directory(format!("bind: {e}")))?;
-        if bind.rc != 0 {
+        if rc != 0 {
             return Err(BindError::InvalidCredentials);
         }
 
         // Read the group-membership attribute off the (now bound) user entry.
-        let (rs, _res) = ldap
+        let entries = ldap
             .search(
                 &user_dn,
-                Scope::Base,
+                SearchScope::Base,
                 "(objectClass=*)",
-                vec![self.cfg.group_attr.as_str()],
+                &[self.cfg.group_attr.as_str()],
             )
-            .and_then(|r| r.success())
             .map_err(|e| BindError::Directory(format!("group read: {e}")))?;
 
         let mut group_dns: Vec<String> = Vec::new();
-        if let Some(entry) = rs.into_iter().next() {
-            let entry = SearchEntry::construct(entry);
+        if let Some(entry) = entries.into_iter().next() {
             if let Some(vals) = entry.attrs.get(&self.cfg.group_attr) {
-                group_dns.extend(vals.iter().cloned());
+                // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
+                // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
+                if vals.len() > MAX_GROUP_VALUES {
+                    tracing::warn!(
+                        module = "ldap",
+                        count = vals.len(),
+                        cap = MAX_GROUP_VALUES,
+                        "memberOf exceeded cap; truncating group values"
+                    );
+                }
+                group_dns.extend(vals.iter().take(MAX_GROUP_VALUES).cloned());
             }
         }
 
-        let _ = ldap.unbind();
+        ldap.unbind();
 
         let roles = groups::roles_from_group_dns(&group_dns, self.cfg.role_from);
-        let mut principal = Principal::from_id(format!("ldap:{username}"));
+        let mut principal = Principal::from_id(principal_id(&user_dn));
         principal.roles = roles;
         Ok(principal)
     }
