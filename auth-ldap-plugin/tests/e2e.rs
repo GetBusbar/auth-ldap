@@ -329,11 +329,13 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         format!(
             "listen: \"127.0.0.1:{data_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
-             auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
-             \x20 admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
-             \x20 methods:\n    ldap:\n      browser_login: {{}}\n      url: \"{url}\"\n\
+             identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             \x20 ldap:\n    module: ldap\n    browser_login: {{}}\n\
+             \x20   settings:\n      url: \"{url}\"\n\
              \x20     bind_dn_template: \"uid={{username}},ou=people,dc=example,dc=org\"\n\
              \x20     base_dn: \"dc=example,dc=org\"\n      group_attr: \"seeAlso\"\n      role_from: cn\n\
+             auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
+             \x20 admin_auth: [admin-tokens]\n\
              \x20 role_bindings:\n    ldap:\n      admins:\n        group: eng-team\n\
              plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
              groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
@@ -355,7 +357,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("spawn busbar with auth.methods.ldap");
+        .expect("spawn busbar with identity-providers.ldap");
     let base = format!("http://127.0.0.1:{data_port}");
     wait_for_health(&client, &format!("{base}/healthz"), &mut child);
 

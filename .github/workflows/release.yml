@@ -147,7 +147,7 @@ jobs:
             --lib "$lib" \
             --name "busbar-auth-ldap-plugin" --alias "ldap" --kind auth \
             --version "$ver" --publisher busbar \
-            --description "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder and add ldap to auth.chain / auth.methods with auth.methods.ldap settings (url, bind_dn_template, base_dn, group_attr)." \
+            --description "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder, define it once under identity-providers.<name> (module: ldap, settings: url, bind_dn_template, base_dn, group_attr) and reference that name from auth.chain." \
             --license Apache-2.0 \
             --out "${outdir}/busbar-auth-ldap-plugin-${ver}-${target}.tar.gz" \
             $unsigned_flag
