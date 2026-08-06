@@ -300,11 +300,38 @@ fn roles_cn_mode_maps_and_dedups() {
     let dns = vec![
         "CN=engineers,OU=Groups,DC=corp,DC=example".to_string(),
         "CN=sre,OU=Groups,DC=corp,DC=example".to_string(),
-        // duplicate CN via different case / path — dedups after CN extraction
-        "CN=engineers,OU=Other,DC=corp,DC=example".to_string(),
+        // Same group, different CASE and a different OU path. LDAP group names are
+        // case-insensitive, so this must collapse onto the one already seen. The fixture used to
+        // say "different case" in a comment while actually repeating the lowercase spelling, so
+        // the property the comment claimed was never exercised.
+        "CN=Engineers,OU=Other,DC=corp,DC=example".to_string(),
     ];
     let roles = roles_from_group_dns(&dns, RoleFrom::Cn);
     assert_eq!(roles, vec!["engineers".to_string(), "sre".to_string()]);
+}
+
+/// The role a CN yields must be lowercase, because it is looked up as a `role_bindings` MAP KEY and
+/// that lookup is case-sensitive while LDAP is not. A directory storing `CN=Engineers` against an
+/// operator config keyed `engineers` otherwise produces the worst shape available: the bind
+/// succeeds, `Identify` is returned, a key is minted, and NOT ONE role is bound. Nothing fails, and
+/// the user simply has no access. `RoleFrom::Dn` already lowercased; the default mode did not.
+#[test]
+fn roles_cn_mode_lowercases_so_role_bindings_keys_match() {
+    let dns = vec![
+        "CN=Engineers,OU=Groups,DC=corp,DC=example".to_string(),
+        "CN=SRE,OU=Groups,DC=corp,DC=example".to_string(),
+        "cn=Platform-Eng,ou=groups,dc=corp,dc=example".to_string(),
+    ];
+    let roles = roles_from_group_dns(&dns, RoleFrom::Cn);
+    assert_eq!(
+        roles,
+        vec![
+            "engineers".to_string(),
+            "sre".to_string(),
+            "platform-eng".to_string()
+        ],
+        "a CN must map to a lowercase role so it matches the role_bindings key an operator writes"
+    );
 }
 
 #[test]

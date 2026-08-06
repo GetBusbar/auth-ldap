@@ -40,7 +40,7 @@ plugin opens its own socket — the same in-process model
    redirect.
 5. On a successful bind it reads the user's group memberships
    (`memberOf` by default) and returns
-   `LoginOutcome::Identify(Principal)` with `id = "ldap:<uid>"` and
+   `LoginOutcome::Identify(Principal)` with `id = "ldap:<the full lowercased bind DN>"` and
    `roles` set from the mapped group names.
 
 Because LDAP is a login method rather than a data-plane bearer verifier,
@@ -193,7 +193,7 @@ checkout is needed for the LDAP logic itself; `auth-ldap-plugin` depends
 on it as a normal workspace path dependency (`../auth-ldap`).
 
 The remaining dependencies reach into the
-[busbarAI](https://github.com/GetBusbar/busbarAI) monorepo: `busbar-api`
+[busbarAI](https://github.com/GetBusbar/busbar) monorepo: `busbar-api`
 (needed by both crates), `busbar-plugin-sdk` (`auth-ldap-plugin` only),
 and, as a dev-dependency for the end-to-end test,
 `busbar-plugin-loader`. Because busbarAI is not yet public, both crates'

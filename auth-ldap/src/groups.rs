@@ -29,11 +29,18 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
     let mut seen: HashSet<String> = HashSet::with_capacity(group_dns.len());
     for dn in group_dns {
         let role = match mode {
+            // LOWERCASED, like the `Dn` arm below. The role is looked up as a `role_bindings` MAP
+            // KEY, and that lookup is case-sensitive while LDAP group names are not. A directory
+            // storing `CN=Engineers` against an operator config keyed `engineers` otherwise
+            // produces the worst outcome available: the bind succeeds, the login is identified, a
+            // key is minted, and not one role is bound. Nothing errors and the user simply has no
+            // access. This module's own doc block names that hazard; only the non-default arm
+            // handled it.
             RoleFrom::Cn => match first_cn(dn) {
-                Some(cn) => cn,
+                Some(cn) => cn.to_lowercase(),
                 // A memberOf value with no CN RDN (unusual) falls back to the whole trimmed value so
                 // membership is never silently dropped.
-                None => dn.trim().to_string(),
+                None => dn.trim().to_lowercase(),
             },
             RoleFrom::Dn => dn.trim().to_lowercase(),
         };
