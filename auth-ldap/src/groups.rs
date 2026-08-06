@@ -5,7 +5,7 @@
 //! places a username crosses into an LDAP wire syntax (a DN template, a search filter). These carry
 //! no I/O, so they are fully unit-tested — the LDAP bind itself needs a live directory.
 //!
-//! ## The group → role mapping gap (README gap #6)
+//! ## Group DN → role normalization
 //!
 //! LDAP/AD groups are DNs: `CN=engineers,OU=Groups,DC=corp,DC=example`. A [`Principal`]'s `roles`
 //! (wire `Identity.groups`) is a `Vec<String>` and `auth.role_bindings.ldap` keys policy on those
@@ -13,8 +13,8 @@
 //! `=` (awkward YAML keys), it is case-insensitive in LDAP but case-SENSITIVE as a `role_bindings`
 //! map key, and its OU path is deployment-specific. The engine offers no DN normalization, so the
 //! module must decide the shape. [`RoleFrom`] lets the operator pick CN-only (the sane default) vs
-//! full DN. This is a normalization decision the ABI pushes entirely onto the plugin — additive to
-//! fix later (an engine-side DN-normalizing role mapper), not a 1.5.2 blocker.
+//! full DN. The normalization decision sits with the plugin because the ABI has nowhere else to put
+//! it; an engine-side DN-normalizing role mapper would be an additive improvement.
 
 use std::collections::HashSet;
 

@@ -14,10 +14,9 @@
 //!    and returns [`busbar_api::LoginOutcome::Identify`] with a [`Principal`] whose `roles` are the
 //!    group names, mapped to policy downstream by the operator's `auth.role_bindings.ldap`.
 //!
-//! ## Auth ABI v2 (1.5.2 credential flow) — the LDAP method, fully expressed
+//! ## Auth ABI v2 — the LDAP credential method
 //!
-//! This crate was born as a stress-test of the 1.5.2 `LoginModule` ABI; the gaps it surfaced were
-//! then landed in the frozen v2 ABI, and this module is now a real, complete credential-flow plugin:
+//! This module requires auth ABI v2, the version that carries the credential login flow:
 //!
 //! - [`login_kind`](LdapModule::login_kind) declares [`LoginKind::Credential`] so the chooser renders
 //!   a form (not a redirect button) WITHOUT any side-effecting `begin_login` call.
@@ -50,10 +49,10 @@ const MAX_GROUP_VALUES: usize = 4096;
 
 /// A secret string that NEVER reveals itself through `Debug`/`Display`.
 ///
-/// The service-account bind password used to be a bare `String` on the `#[derive(Debug)]`
-/// [`LdapConfig`], so — unlike the end-user password, which rides `Redacted` across the wire — it
-/// could leak into a log line, a `tracing` field, or a panic/`{:?}` dump. Wrapping it makes the
-/// redaction STRUCTURAL. `#[serde(transparent)]` keeps deserialization identical (a plain JSON
+/// The end-user password rides `Redacted` across the wire, but the service-account bind password
+/// lives on the `#[derive(Debug)]` [`LdapConfig`], where a bare `String` could leak into a log line,
+/// a `tracing` field, or a panic/`{:?}` dump. This wrapper makes the redaction STRUCTURAL.
+/// `#[serde(transparent)]` keeps deserialization identical (a plain JSON
 /// string), and the plaintext is reachable only through the explicit [`SecretString::expose`] audit
 /// point.
 #[derive(Clone, Deserialize)]
@@ -87,9 +86,8 @@ pub enum RoleFrom {
 
 /// Open-time configuration for the LDAP module — the module's OPAQUE `auth.methods.ldap` settings,
 /// deserialized from the JSON the engine passes to `open`. Every LDAP-specific knob (URL, DN
-/// templates, TLS/CA, group attribute) fits here as opaque module settings — this is one of the
-/// parts of the ABI that fits LDAP cleanly (see README "What worked"): the engine never needs to
-/// understand any of these fields.
+/// templates, TLS/CA, group attribute) fits here as opaque module settings: the engine never needs
+/// to understand any of these fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LdapConfig {
@@ -135,7 +133,7 @@ pub struct LdapConfig {
     /// so the plugin never sees it. There is no equivalent seam for a plugin that must present a
     /// *service-account* secret on a socket it opens itself — this is a raw string here, so the
     /// bind-service password would arrive as plaintext in the opaque settings blob (no core-side
-    /// secret resolution for plugin-opened connections). See README gap #5.
+    /// secret resolution for plugin-opened connections). See Limitations in the README.
     #[serde(default)]
     pub bind_service_password: Option<SecretString>,
 
@@ -396,7 +394,7 @@ impl LoginModule for LdapModule {
         // LDAP must do the I/O itself, inside this sync FFI call, which the engine invokes from an
         // async login handler. There is no async seam and no "run me on a blocking thread" contract in
         // the LoginModule ABI, so a correct deployment must ensure the host offloads the plugin call
-        // to a blocking thread. Catalogued in README as a secondary gap.
+        // to a blocking thread. See Limitations in the README.
         match self.bind_and_identify(username, password) {
             Ok(principal) => LoginOutcome::Identify(principal),
             Err(BindError::InvalidCredentials) => LoginOutcome::Reject,
@@ -405,7 +403,7 @@ impl LoginModule for LdapModule {
                 // ABI's `LoginOutcome` has no `Error`/`Retry` variant distinct from `Reject`, so an
                 // outage is squashed into the same fail-closed verdict as a wrong password — the user
                 // sees "login failed" with no way for the page to say "try again later". (Minor gap;
-                // additive-later — noted in README.) We at least log the operational detail (never the
+                // see Limitations in the README.) The operational detail is logged (never the
                 // credential) so an operator can tell the two apart.
                 tracing::warn!(module = "ldap", error = %e, "ldap bind/search failed (not a credential rejection)");
                 LoginOutcome::Reject

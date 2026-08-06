@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Unit tests for the PURE surface of the LDAP module: config parsing, bind-DN templating +
-//! injection defense, LDAP filter escaping, and the group-DN → role mapping (the README gap #6
-//! normalization). The BIND itself needs a live directory and is not covered here.
+//! injection defense, LDAP filter escaping, and the group-DN → role normalization. The BIND itself
+//! needs a live directory and is not covered here.
 
 use crate::groups::{escape_filter, first_cn, roles_from_group_dns, validate_username};
 use crate::{
@@ -190,8 +190,8 @@ fn new_rejects_ca_cert_pem() {
     );
 }
 
-/// Finding #4: the service-account password must never appear in a `Debug` dump of the config (it
-/// used to be a bare `String` on a `#[derive(Debug)]` struct).
+/// The service-account password must never appear in a `Debug` dump of the config: `LdapConfig`
+/// derives `Debug`, so the field has to carry its own redaction.
 #[test]
 fn service_password_redacted_in_debug() {
     let cfg: LdapConfig = serde_json::from_value(serde_json::json!({

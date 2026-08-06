@@ -1,185 +1,258 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# busbar-auth-ldap — AD/LDAP auth module (1.5.2 LoginModule ABI stress-test)
+# auth-ldap
 
-This repo is an AD/LDAP auth plugin for busbar. It **began as a design-validation exercise** that stress-tested
-the 1.5.2 `LoginModule` ABI (`crates/api/src/auth.rs`) against the one auth flavor that exercises the
-**credential path** (username/password) **and opens its own socket** — unlike OIDC/GitHub, which are all
-redirect + core-executes-HTTP-hop. The three blocking gaps it surfaced (**#1** credential form, **#2**
-redirect-vs-credential classification, **#3** password redaction) then **LANDED in the frozen auth ABI v2**, and
-this plugin now implements the **full LDAP credential flow** against it (`login_kind() = Credential`,
-`begin_login → Prompt(LoginForm{username,password})`, `complete_login` reads the `submitted` map, BINDs,
-`Identify`). The gap list below is kept as the record of that analysis, each blocking gap now annotated
-**✅ RESOLVED (v2)**; only the additive-later items (#4-async, #5, #6, #7) remain open, marked `// ABI GAP:`
-in-source.
+The first-party, signed `kind: auth` plugin for
+[busbar](https://getbusbar.com) that authenticates a username and
+password against an AD/LDAP directory: a real LDAP/LDAPS **BIND** as the
+credential check, a group read off the bound user, and a group-DN → role
+mapping that hands busbar a `Principal` it can bind to virtual keys and
+roles.
 
-## The intended LDAP flow
+It is a `cdylib` that implements busbar's `AuthModule` and `LoginModule`
+traits (via
+[`busbar-plugin-sdk`](https://github.com/GetBusbar/busbar/tree/main/crates/plugin-sdk))
+and is loaded in-process by busbar over the signed hybrid plugin ABI —
+`dlopen`'d, not spawned as a separate process. It requires **auth ABI
+v2** (`abi_version = 2`), the version that carries the credential login
+flow.
 
-dev types username+password on the busbar login page → `POST /auth/token` → core calls the plugin's
-`complete_login(username, password)` → plugin opens its **own LDAP/LDAPS socket** and does a **BIND** (the
-credential check) → on success reads the user's groups (`memberOf`) → returns
-`Identify(Principal{ id: "ldap:<uid>", roles: <groups> })`. **No browser redirect. No HTTP hop.**
+It is a **separate plugin from `busbar-auth-oidc`**, and takes a
+different shape: OIDC is a redirect flow where the core executes the
+token-exchange HTTP hop, while LDAP is a direct credential flow where the
+plugin opens its own socket — the same in-process model
+`hashicorp-vault` uses for its HTTPS calls.
 
----
+## The login flow
 
-## GAP LIST (ranked)
+1. A user types a username and password on busbar's hosted login page.
+   `login_kind()` returns `Credential`, so the method chooser renders a
+   form rather than a redirect button, without having to call
+   `begin_login` first.
+2. `begin_login` returns `LoginOutcome::Prompt(LoginForm)` declaring two
+   fields — `username` (text) and `password` (password) — which the core
+   renders and POSTs back to `/auth/token`.
+3. `complete_login` reads those values back out of `CompleteLogin::
+   submitted`, keyed by the field names the plugin declared. The values
+   ride `Redacted` (`Debug`/`Display` print `***`, zeroized on drop) and
+   are exposed only at that one boundary, for the bind.
+4. The plugin opens its own LDAP/LDAPS socket and BINDs with the user's
+   DN and password. That bind *is* the credential check — no token, no
+   redirect.
+5. On a successful bind it reads the user's group memberships
+   (`memberOf` by default) and returns
+   `LoginOutcome::Identify(Principal)` with `id = "ldap:<uid>"` and
+   `roles` set from the mapped group names.
 
-### 🔴 GAP #1 — No `LoginOutcome` variant to render a credential FORM  ·  **✅ RESOLVED (v2)**
-> Landed as `LoginOutcome::Prompt(LoginForm{ fields: Vec<LoginField{ name, label, kind: FieldKind::{Text,Password}, required }> })` (+ wire mirror in `plugin-abi`). `begin_login` now returns `Prompt([username(Text), password(Password)])`; the core renders it and POSTs the values back. Original analysis below.
+Because LDAP is a login method rather than a data-plane bearer verifier,
+`AuthModule::authenticate` returns `Pass` — "not my credential shape" —
+and the auth chain continues.
 
-- **What LDAP needs:** `begin_login` must tell the hosted login page to render a **username/password form** and
-  POST it back to `/auth/token`. OIDC returns `LoginOutcome::Authorize(url)` and the page renders a *redirect
-  button*; LDAP has no URL.
-- **Why the ABI can't express it:** `LoginOutcome` has exactly four variants —
-  `Authorize(String)` · `Exchange(LoginHop)` · `Identify(Principal)` · `Reject`. None means "collect these
-  fields from the browser and return them to me." Worse, the core's fail-closed `map_begin_login`
-  (`crates/plugin-loader/src/auth.rs`) coerces *anything that isn't `AuthorizeUrl`* to `Reject` on the begin
-  path — so the form step is unreachable no matter what the plugin returns.
-- **Exact proposed change** (`crates/api/src/auth.rs`, mirrored in `crates/plugin-abi/src/auth.rs`):
-  ```rust
-  pub struct LoginField { pub key: String, pub label: String, pub secret: bool }
-  pub enum LoginOutcome {
-      Authorize(String),
-      Prompt(Vec<LoginField>),   // NEW: render this form; POST the values back to /auth/token
-      Exchange(LoginHop),
-      Identify(Principal),
-      Reject,
-  }
-  ```
-  Wire side: add `AuthResponse::Prompt(Vec<FieldSpec>)` and admit it in `map_begin_login`. The login page
-  renders `Prompt` (a `secret:true` field ⇒ `<input type=password>`); the POST feeds the collected values into
-  `complete_login`, whose `username`/`password` slots **already exist** to receive them.
-- **Why 1.5.2, not additive:** `LoginOutcome` is a `#[non_exhaustive]`-less public enum in the frozen ABI.
-  Adding a variant later is a **breaking change** for every plugin/loader match arm. If credential login is a
-  supported shape at all, the variant must exist before the ABI freezes. This is the single 1.5.2-blocking gap.
+There is no `client_secret`: a credential method is not a confidential
+OAuth client, so `LdapConfig` has no such field and
+`deny_unknown_fields` rejects one if it is configured.
 
-### 🔴 GAP #2 — The chooser can't classify credential-vs-redirect, and the login-button config is OAuth-only  ·  **✅ RESOLVED (v2)**
-> Landed as `enum LoginKind { Redirect, Credential }` + a pure `fn login_kind(&self) -> LoginKind` (default `Redirect`) the chooser reads at load without side effects, plus `client_secret: Option<SecretRef>` (was required) validated per kind — `Credential` methods must have it ABSENT. LDAP returns `login_kind() = Credential` and carries no `client_secret`. Original analysis below.
+## Design
 
-- **What LDAP needs:** with `oidc` (redirect) + `ldap` (credential) both configured, the chooser must know
-  *before the user clicks* that ldap shows a **form** and oidc **redirects** — and it must be able to render an
-  ldap button at all.
-- **Why the ABI can't express it:** (a) `LoginModule` exposes only `begin_login`/`complete_login`; there is **no
-  capability/classification method** and no way to know a method is credential-shaped without calling
-  `begin_login` — which for LDAP just fails closed (GAP #1). (b) The gate that decides a plugin can serve the
-  browser flow is purely `abi_version >= 2` (`crates/plugin-loader/src/registry.rs`); it says *login-capable*,
-  not *redirect vs form*. (c) Structurally worse: what makes a method render a button is the **presence of the
-  `browser_login:` config block** (`BrowserLoginCfg` in `crates/busbar/src/config/mod.rs`), and that block
-  **requires `client_secret: SecretRef` (non-optional)** — a *confidential-client secret LDAP does not have*.
-  So an operator literally cannot render an LDAP button without inventing a bogus `client_secret`.
-- **Exact proposed change:** add a classification the chooser can read without side effects. Minimal form — a
-  method-kind on the login config plus an optional (not required) secret:
-  ```rust
-  pub enum LoginKind { Redirect, Credential }   // NEW
-  // BrowserLoginCfg:
-  pub kind: LoginKind,                 // default Redirect (back-compat with oidc)
-  pub client_secret: Option<SecretRef>,// was required; make optional — LDAP has none
-  ```
-  A `Credential` method renders a form; a `Redirect` method calls `begin_login` for its URL. (Alternatively a
-  `fn login_kind(&self) -> LoginKind` on `LoginModule`, but a config-side flag avoids a plugin round-trip at
-  page render.)
-- **Why 1.5.2:** making `client_secret` optional and adding the kind after the ABI freezes changes a required
-  field and the login-config contract — both breaking for a released config schema.
+This repo is a same-repo, 2-crate Cargo workspace, mirroring `auth-oidc`:
+`auth-ldap/` (the `busbar-auth-ldap` library — the real LDAP BIND,
+group-read and role-mapping logic, no plugin ABI) and
+`auth-ldap-plugin/` (the `busbar-auth-ldap-plugin` cdylib adapter, which
+is a thin `export_login_plugin!` shim). A custom build can link the
+library crate statically instead of going through the plugin ABI.
 
-### 🟠 GAP #3 — The password crosses to the plugin with no redaction  ·  **✅ RESOLVED (v2)**
-> Landed as `CompleteLogin.submitted: Vec<(String, Redacted<String>)>` (subsuming the old ad-hoc `username`/`password`). Values ride `Redacted` (Debug/Display print `***`, `Zeroize` on drop) on the engine side; the plugin exposes them via `expose_secret()` only at the single documented `complete_login` boundary for the bind. Original analysis below.
+LDAP work is done with [`ldap3`](https://crates.io/crates/ldap3) in its
+`sync` + `tls-rustls` configuration: the blocking `LdapConn` is what the
+synchronous `LoginModule::complete_login` signature needs, and rustls
+keeps the plugin on the same TLS backend as the rest of the ecosystem
+rather than pulling in a second, OpenSSL-based stack.
 
-- **What LDAP needs:** the password *must* cross to the plugin (only the plugin can BIND). It must not be
-  loggable or leak into the error/out channel.
-- **Why the ABI can't express it:** the ABI is deliberately asymmetric — OIDC's `client_secret` is
-  **structurally kept off the plugin** (the core injects it into the hop's `secret_form_field`; `BeginLogin`
-  has *no secret field* by design). But the LDAP password rides `CompleteLogin.password: Option<String>` /
-  wire `CompleteLoginRequest.password`, and **every carrier derives `Debug`** (`CompleteLogin`,
-  `CompleteLoginRequest`, `AuthRequest::CompleteLogin`) — so `{:?}` prints the password in the clear (asserted
-  in `complete_login_carries_username_password`). There is no `Secret`-wrapper / redacting type and no
-  documented "never log this" contract on the field, whereas the secret path got a structural guarantee.
-- **Exact proposed change:** wrap the field in a redacting newtype whose `Debug`/`Display` print `***`:
-  ```rust
-  pub struct Redacted(String);              // Debug/Display => "***"; explicit .expose() to read
-  pub struct CompleteLogin { /* … */ pub password: Option<Redacted>, /* … */ }
-  ```
-  Same on the wire type (it can still `serde` as a bare string). This gives the credential path the same
-  can't-accidentally-leak property the secret path already has.
-- **Why ideally 1.5.2:** changing the field type is breaking; doing it post-freeze is a second breaking change.
-  Cheap to land now. (If deferred, it's *mitigable* by convention — "never `Debug` the request" — so it is a
-  notch below #1/#2, but the structural fix belongs with the ABI.)
+Two directory shapes are supported:
 
-### 🟢 GAP #4 — Plugin-opens-socket: **NOT a gap.** (Verified allowed.)
-- Auth plugins load over the **exact same six-symbol dlopen path** as store/secret/hook plugins
-  (`export_login_plugin!` → `export_plugin!`, `crates/plugin-sdk/src/lib.rs`); the loader has **no sandbox, no
-  seccomp, no network broker** — it runs the cdylib in-process. `hashicorp-vault` opens its own blocking HTTPS
-  socket inside a sync `resolve()`; LDAP does the same inside `complete_login`. So a plugin-opened LDAP/LDAPS
-  socket is fully allowed. **This part of the ABI fits LDAP cleanly.**
-- **BUT — secondary async gap (🟠 additive-later):** `LoginModule::complete_login` is **synchronous**, and the
-  LDAP BIND is **blocking network I/O**, invoked by the engine from an **async** login handler. OIDC never
-  blocks (the core runs its hop on its own async side); LDAP has nowhere to put the I/O but inside the sync FFI
-  call. There is no async seam and no "offload me to a blocking thread" contract in the `LoginModule` ABI, so a
-  correct deployment depends on the host wrapping the plugin call in `spawn_blocking`. Marked
-  `// ABI GAP (async):` in `complete_login`. Additive-later (a host-side convention / a documented threading
-  contract fixes it without changing the ABI types).
+- **Direct bind** — `bind_dn_template` turns the username into a DN
+  (`uid={username},ou=people,dc=corp,dc=example`, or an AD UPN bind
+  `{username}@corp.example`) and the plugin binds as that DN.
+- **Search-then-bind** — set `user_search_filter` (e.g.
+  `(sAMAccountName={username})`) and the plugin first binds as
+  `bind_service_dn`, locates the user entry, then re-binds as the DN it
+  found.
 
-### 🟢 GAP #5 — LDAPS/TLS, CA, bind-DN template, base-DN, group attr: **mostly fit; one small secret-ref gap**
-- URL, `bind_dn_template`, `base_dn`, `group_attr`, `ca_cert_pem`, `start_tls`, `role_from`, timeouts all fit in
-  the method's **opaque `settings` map** (`AuthMethodCfg { #[serde(flatten)] settings }`) — the engine never
-  needs to understand them. This is the same clean opaque-config seam OIDC and Vault use. **No ABI gap.**
-- **Small gap (🟠 additive-later):** search-then-bind needs a **service-account password**. OIDC's
-  `client_secret` is a `SecretRef` the *core* resolves and injects so the plugin never sees it. There is **no
-  equivalent core-side secret-resolution seam for a secret a plugin needs to present on a socket it opens
-  itself** — so `bind_service_password` arrives as **plaintext inside the opaque settings blob**
-  (`// ABI GAP (secret-ref)` in `LdapConfig`). Additive-later: extend the settings-resolution path to expand
-  `SecretRef`s inside opaque plugin settings before `open()`.
+The username is validated and RFC 4515-escaped before it reaches either
+a DN template or a search filter, so a crafted username cannot inject
+DN components or filter syntax.
 
-### 🟢 GAP #6 — Group DN → role normalization is pushed entirely onto the plugin  ·  **additive-later**
-- LDAP/AD groups are **DNs** (`CN=engineers,OU=Groups,DC=corp,DC=example`). `Principal.roles` (wire
-  `Identity.groups`) is `Vec<String>` and `auth.role_bindings.ldap` keys policy on those strings, so a DN
-  *works* verbatim — **the type fits**. But a DN is a hostile `role_bindings` key: commas + `=` (awkward YAML
-  keys), **LDAP-case-insensitive but map-case-sensitive**, and OU-path-specific. The engine offers no DN
-  normalization, so the plugin must choose the shape — this crate's `RoleFrom::{Cn,Dn}` (default `Cn`, tested).
-  Not an ABI blocker; an engine-side DN-normalizing role mapper would be a nice additive-later ergonomic.
+## Config
 
-### 🟠 GAP #7 — No verdict distinct from `Reject` for "wrong password (retry)" vs "directory down"  ·  additive-later
-- On a login form, a wrong password should re-render the form ("try again"); a directory outage is a 5xx
-  ("try later"). `LoginOutcome` collapses both into `Reject` (fail-closed, stop the chain) — there is no
-  `Retry`/`Error` verdict, so `complete_login` squashes an outage into the same result as a bad credential
-  (marked inline; we log the operational detail, never the credential). Additive-later — a new terminal variant
-  is only additive if `LoginOutcome` is already being reopened for GAP #1 (in which case land it together).
+Configured like any other busbar auth method — an entry under
+`identity-providers:` referenced by name from `auth.chain`:
 
----
+```yaml
+identity-providers:
+  corp-ldap:                 # the NAME is the instance; `module:` is the plugin behind it
+    module: ldap
+    settings:
+      url: "ldaps://ad.corp.example:636"
+      bind_dn_template: "{username}@corp.example"
+      base_dn: "dc=corp,dc=example"
+      role_from: cn
 
-## What the ABI got RIGHT for LDAP (fits cleanly)
-- **The generic `submitted: Vec<(String, Redacted<String>)>` map** (v2, subsuming the old ad-hoc
-  `username`/`password`) delivers the form values keyed by the field `name` the plugin declared in `Prompt` —
-  `complete_login` reads `submitted["username"]`/`submitted["password"]` with zero ABI friction, and a future
-  method declaring `[username, password, totp]` just works.
-- **`Identify(Principal{ id, roles, ttl_secs })`** maps to LDAP 1:1: `id = "ldap:<uid>"`, `roles = groups`,
-  `ttl_secs` for the identity cache. `Identity ↔ Principal` (`groups ↔ roles`) is lossless.
-- **`cacheable() = true`** is exactly the documented "real I/O per call" case — the engine caches the identity.
-- **Plugin-opens-socket is allowed** (GAP #4) — no sandbox; same in-process dlopen as vault.
-- **Opaque `settings`** carry every LDAP knob without the engine understanding any of them (GAP #5).
-- **`authenticate` → `Pass`** cleanly models "LDAP is a login method, not a data-plane bearer verifier" — it
-  defers and the chain continues.
+auth:
+  chain: [keys, corp-ldap]   # built-ins (`keys`, `admin-tokens`) are referenced bare
+```
 
-## The plugin (implemented against frozen auth ABI v2)
-- **Compiles + gate-green** against the frozen v2 ABI (`cargo build` / `test` / `clippy -D warnings` /
-  `fmt --check`; path-deps into the `busbarAI` core checkout). Two-crate layout mirroring `auth-oidc`:
-  `busbar-auth-ldap` (logic) + `busbar-auth-ldap-plugin` (cdylib, `export_login_plugin!`). Manifest
-  `abi_version = 2`.
-- **Full credential flow:** `login_kind() = Credential`; `begin_login → Prompt(LoginForm{ username(Text),
-  password(Password) })`; `complete_login` reads the `submitted` map (`Redacted` values, exposed only for the
-  bind), opens its OWN LDAP socket, BINDs, reads groups, `Identify`. No `client_secret` (structurally absent).
-- **Real LDAP BIND + group read** via `ldap3` (sync, rustls TLS), incl. direct-bind and search-then-bind,
-  LDAPS/STARTTLS, and DN→role mapping.
-- **Remaining `// ABI GAP:` markers** are the additive-later items only (#5 secret-ref for the service-account
-  password; #4-async sync/blocking I/O).
-- **Tests: 22 passing** (18 lib + 4 plugin). Cover config parse + `deny_unknown_fields` incl. **client_secret
-  rejected**, bind-DN templating + **LDAP-injection rejection**, RFC4515 filter escaping, group-DN → role
-  mapping (CN/DN, dedup, escaped commas), the `authenticate` defer, `login_kind() = Credential`, the
-  `begin_login` `Prompt` form shape, the `submitted`-map field parsing (+ `Redacted` never leaks in `Debug`),
-  and `complete_login` credential guards (missing/empty). The live-bind happy path is integration-only.
+Group-to-role mapping is keyed by that same provider name:
 
-## Recommendation
-**The three 1.5.2-blocking gaps LDAP surfaced (#1 credential form, #2 redirect-vs-credential classification, #3
-password redaction) all landed in the frozen auth ABI v2** — `LoginOutcome::Prompt(LoginForm)`, a pure
-`login_kind()` classifier with `client_secret` made `Optional` + per-kind validated, and the generic
-`submitted: Vec<(String, Redacted<String>)>` transport. This plugin now implements the full flow against them
-with zero remaining blockers. GAP #4-async, #5-secret-ref, #6, #7 stay **additive-later** and do not block the
-freeze.
+```yaml
+auth:
+  role_bindings:
+    corp-ldap:
+      engineers: { group: engineering }
+```
+
+| Setting | Required | Default | Notes |
+|---|---|---|---|
+| `url` | yes | — | `ldaps://host:636` (implicit TLS), or `ldap://host:389` for plaintext/STARTTLS. |
+| `bind_dn_template` | yes | — | Turns a username into the bind DN. Must contain `{username}`; validated at boot. |
+| `base_dn` | yes | — | Search base for the group read, and for the search-then-bind user lookup. |
+| `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. |
+| `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the leftmost RDN value, `dn` uses the full DN verbatim. |
+| `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}`; requires `bind_service_dn`. |
+| `bind_service_dn` | no | — | Service-account DN used for the search-then-bind lookup. |
+| `bind_service_password` | no | — | Service-account password. Held in a redacting wrapper; see [Limitations](#limitations). |
+| `ca_cert_pem` | no | — | Reserved. A config that sets it is **rejected at boot** — see [Limitations](#limitations). |
+| `start_tls` | no | `false` | Use STARTTLS over an `ldap://` connection instead of implicit LDAPS. |
+| `allow_insecure_transport` | no | `false` | Override the plaintext-transport guard. See below. |
+| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. |
+
+Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
+stray key fails loudly at boot instead of being silently ignored.
+
+A plaintext `ldap://` URL pointing at a **non-loopback** host with no
+STARTTLS is rejected at config time: it would put the service-account
+password and every end-user password on the wire in the clear.
+`allow_insecure_transport: true` knowingly overrides that guard for a
+trusted, isolated segment. It is a no-op for `ldaps://`, for STARTTLS,
+and for a loopback host.
+
+## Limitations
+
+- **`ca_cert_pem` is not wired.** The field deserializes for forward
+  compatibility, but the custom-CA TLS path is not implemented, so
+  `LdapModule::new` **rejects** a config that sets it. Accepting and
+  ignoring it would silently fall back to the system trust roots while
+  the operator believed a private CA was in use. Use a system-trusted
+  certificate until this lands.
+- **The service-account password arrives as plaintext in the settings
+  blob.** OIDC's `client_secret` is a `SecretRef` the core resolves and
+  injects, so the plugin never sees it. There is no equivalent seam for
+  a secret a plugin must present on a socket it opens itself, so
+  `bind_service_password` is a raw string in the opaque settings map.
+  The plugin wraps it in a redacting newtype (`Debug`/`Display` print
+  `***`, plaintext reachable only through an explicit `expose()`), which
+  bounds the blast radius but does not remove the plaintext from config.
+- **Blocking I/O inside a synchronous FFI call.** `complete_login` is
+  synchronous and the LDAP bind is blocking network I/O, invoked by the
+  engine from an async login handler. The `LoginModule` ABI has no async
+  seam and no "run me on a blocking thread" contract, so a correct
+  deployment depends on the host offloading the plugin call to a
+  blocking thread.
+- **A directory outage is indistinguishable from a bad password to the
+  caller.** `LoginOutcome` has no verdict between `Identify` and
+  `Reject`, so an unreachable or TLS-broken directory collapses into the
+  same fail-closed `Reject` a wrong password produces, and the login
+  page cannot say "try again later". The plugin logs the operational
+  detail (never the credential) at `warn` so an operator can tell the
+  two apart.
+- **Group DNs are normalized by the plugin, not the engine.** LDAP and
+  AD groups are DNs (`CN=engineers,OU=Groups,DC=corp,DC=example`), which
+  make hostile `role_bindings` keys: commas and `=` are awkward in YAML,
+  LDAP compares case-insensitively while the map does not, and the OU
+  path is deployment-specific. `role_from` picks the shape;
+  `cn` is the default for that reason.
+- **Group collection is capped** at 4096 values per user entry, so a
+  hostile or misconfigured directory cannot drive unbounded memory use.
+  The plugin logs when it truncates.
+
+## Build
+
+Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
+until [busbarAI](https://github.com/GetBusbar/busbar) ships publicly —
+a sibling checkout of `busbarAI` at `../busbarAI` (see
+[Dependencies](#dependencies) below).
+
+```sh
+cargo build --release      # cdylib: target/release/libbusbar_auth_ldap_plugin.{so,dylib}
+cargo test                 # unit tests + the end-to-end loader test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Dependencies
+
+`busbar-auth-ldap` (`auth-ldap/`) is a same-repo crate — no external
+checkout is needed for the LDAP logic itself; `auth-ldap-plugin` depends
+on it as a normal workspace path dependency (`../auth-ldap`).
+
+The remaining dependencies reach into the
+[busbarAI](https://github.com/GetBusbar/busbarAI) monorepo: `busbar-api`
+(needed by both crates), `busbar-plugin-sdk` (`auth-ldap-plugin` only),
+and, as a dev-dependency for the end-to-end test,
+`busbar-plugin-loader`. Because busbarAI is not yet public, both crates'
+`Cargo.toml` point at these as **local path dependencies**
+(`../../busbarAI/crates/...`), which means this repo expects to be
+checked out as a sibling of `busbarAI`:
+
+```
+some-parent-dir/
+├── busbarAI/
+└── auth-ldap/          # this repo — the auth-ldap/ + auth-ldap-plugin/ workspace
+```
+
+This is an interim measure — once busbarAI ships publicly, these should
+become git (pinned rev/tag) or crates.io dependencies instead. Grep both
+crates' `Cargo.toml` for the `INTERIM` comments when doing that
+migration.
+
+## Pack and sign
+
+Once built, the cdylib is packed and signed like any other busbar plugin
+— see
+[`docs/plugins.md`](https://github.com/GetBusbar/busbar/blob/main/docs/plugins.md#signing-and-packaging)
+in busbarAI for the full reference. In short:
+
+```sh
+BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \
+    --lib target/release/libbusbar_auth_ldap_plugin.so \
+    --name busbar-auth-ldap-plugin --alias ldap --kind auth \
+    --version 0.1.0 --publisher busbar \
+    --license Apache-2.0 \
+    --out busbar-auth-ldap-plugin-0.1.0-x86_64-linux.tar.gz
+```
+
+For local development without a signing key, `busbar-plugin-pack pack
+--allow-unsigned` produces a tarball busbar loads only under
+`plugins.trust.allow_unsigned: true`. Drop the resulting tarball into
+busbar's configured `plugins.dir`.
+
+## Tests
+
+`cargo test` runs the library crate's unit tests (`auth-ldap/src/tests.rs`)
+and the plugin crate's. Coverage includes config parsing and
+`deny_unknown_fields` (including `client_secret` being rejected),
+bind-DN templating and LDAP-injection rejection, RFC 4515 filter
+escaping, group-DN → role mapping (CN and DN forms, dedup, escaped
+commas), the `authenticate` defer, `login_kind()`, the `begin_login`
+form shape, `submitted`-map parsing including `Redacted` never leaking
+through `Debug`, and the `complete_login` credential guards for a
+missing or empty field.
+
+The live-bind happy path is integration-only: `auth-ldap-plugin/tests/e2e.rs`
+packs the real cdylib with the `busbar-plugin-pack` binary, drives a
+spawned busbar binary over real HTTP, and seeds a real OpenLDAP instance
+over LDAP with the same `ldap3` client the plugin uses. Point
+`BUSBAR_TEST_LDAP_URL` at that directory to run it; with the variable
+unset the test skips loudly rather than passing silently.
+
+## License
+
+Licensed **Apache-2.0** ([LICENSE](LICENSE)). Contributions welcome.
+Security issues go through private disclosure, not public issues.
