@@ -69,7 +69,7 @@ fn search_then_bind_requires_service_dn() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
-/// Finding #5: with a search filter set, a service DN but NO password would make `simple_bind(dn,
+/// With a search filter set, a service DN but NO password would make `simple_bind(dn,
 /// "")` an UNAUTHENTICATED bind. `new()` must require the password too.
 #[test]
 fn search_then_bind_requires_service_password() {
@@ -83,8 +83,8 @@ fn search_then_bind_requires_service_password() {
     );
 }
 
-/// Round-2 finding #1: a service DN with an EMPTY-STRING password still yields `simple_bind(dn, "")`
-/// — an unauthenticated bind. The round-1 guard only checked `is_none()`; `new()` must also reject a
+/// A service DN with an EMPTY-STRING password still yields `simple_bind(dn, "")`, which is an
+/// unauthenticated bind. Checking `is_none()` alone is not enough: `new()` must also reject a
 /// present-but-empty service password.
 #[test]
 fn search_then_bind_rejects_empty_service_password() {
@@ -98,7 +98,7 @@ fn search_then_bind_rejects_empty_service_password() {
     );
 }
 
-/// Round-2 finding #2: a plaintext `ldap://` URL to a NON-loopback host with no STARTTLS sends the
+/// A plaintext `ldap://` URL to a NON-loopback host with no STARTTLS sends the
 /// service and end-user credentials in cleartext. `new()` must reject it by default...
 #[test]
 fn insecure_ldap_nonloopback_rejected() {
@@ -152,7 +152,7 @@ fn loopback_ldap_allowed() {
     }
 }
 
-/// Round-3: a userinfo component must not let a loopback-looking prefix bypass the plaintext guard.
+/// A userinfo component must not let a loopback-looking prefix bypass the plaintext guard.
 /// `ldap://127.0.0.1:389@evil.com` dials `evil.com` in cleartext (the userinfo is `127.0.0.1:389`),
 /// so the host is `evil.com` and the config must be REJECTED — not read as loopback.
 #[test]
@@ -165,7 +165,7 @@ fn userinfo_loopback_prefix_is_treated_as_remote() {
     );
 }
 
-/// Round-3: the `ldaps://` scheme check must not panic on a URL whose multi-byte UTF-8 char straddles
+/// The `ldaps://` scheme check must not panic on a URL whose multi-byte UTF-8 char straddles
 /// byte index 8 (a byte-boundary slice would panic; a plugin must never crash the host on any config).
 #[test]
 fn insecure_transport_check_does_not_panic_on_multibyte_url() {
@@ -178,7 +178,7 @@ fn insecure_transport_check_does_not_panic_on_multibyte_url() {
     );
 }
 
-/// Finding #1: `ca_cert_pem` is documented but never wired into TLS. `new()` must FAIL CLOSED rather
+/// `ca_cert_pem` is documented but never wired into TLS. `new()` must FAIL CLOSED rather
 /// than accept-and-ignore it (which would silently fall back to system roots).
 #[test]
 fn new_rejects_ca_cert_pem() {
@@ -271,7 +271,7 @@ fn first_cn_extracts_leading_cn() {
     assert_eq!(first_cn("OU=nope,DC=x"), None);
 }
 
-/// Finding #9: `\XX` hex-pair DN escapes (RFC 4514) must be resolved, not left literal. Consecutive
+/// `\XX` hex-pair DN escapes (RFC 4514) must be resolved, not left literal. Consecutive
 /// hex bytes decode together as UTF-8.
 #[test]
 fn first_cn_unescapes_hex_pairs() {
@@ -286,7 +286,7 @@ fn first_cn_unescapes_hex_pairs() {
     );
 }
 
-/// Finding #2: the operation timeout is derived from `timeout_secs`. (The full per-op wiring needs a
+/// The operation timeout is derived from `timeout_secs`. (The full per-op wiring needs a
 /// live/hung directory to exercise end-to-end; this guards the value the module hands to `ldap3`.)
 #[test]
 fn timeout_duration_derives_from_secs() {
@@ -418,7 +418,7 @@ fn config_rejects_client_secret() {
     );
 }
 
-// ── Fake-backend coverage of the bind path (finding #6 seam) ─────────────────────────────────────
+// ── Fake-backend coverage of the bind path ───────────────────────────────────────────────────────
 
 /// A scriptable in-memory [`LdapBackend`] standing in for a live directory, so the post-connect bind
 /// logic — result-code handling, ambiguity, group cap, roles, principal id — is unit-testable.
@@ -509,7 +509,7 @@ fn search_cfg() -> LdapConfig {
     .expect("valid search-then-bind config parses")
 }
 
-/// Finding #6 (reject path): a wrong password → non-zero bind rc → `InvalidCredentials`.
+/// A wrong password → non-zero bind rc → `InvalidCredentials`.
 #[test]
 fn bind_wrong_password_is_invalid_credentials() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -522,7 +522,7 @@ fn bind_wrong_password_is_invalid_credentials() {
     assert!(matches!(r, Err(BindError::InvalidCredentials)));
 }
 
-/// Finding #6 (reject path): a search that matches nothing → `InvalidCredentials`, without ever
+/// A search that matches nothing → `InvalidCredentials`, without ever
 /// attempting the user bind.
 #[test]
 fn search_no_match_is_invalid_credentials() {
@@ -536,7 +536,7 @@ fn search_no_match_is_invalid_credentials() {
     assert!(matches!(r, Err(BindError::InvalidCredentials)));
 }
 
-/// Finding #6 (success path) + #3 (normalized id): a successful search-then-bind returns `Identify`
+/// A successful search-then-bind returns `Identify`
 /// with the CN-mapped roles and a principal id keyed on the resolved DN, lowercased.
 #[test]
 fn successful_bind_identifies_with_roles_and_normalized_id() {
@@ -561,7 +561,7 @@ fn successful_bind_identifies_with_roles_and_normalized_id() {
     assert!(fake.unbound, "connection should be unbound on success");
 }
 
-/// Finding #7: a search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
+/// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
 /// the first match.
 #[test]
 fn ambiguous_search_is_rejected() {
@@ -587,7 +587,7 @@ fn ambiguous_search_is_rejected() {
     );
 }
 
-/// Finding #3: two username casings resolve to the SAME principal id (direct-template mode).
+/// Two username casings resolve to the SAME principal id (direct-template mode).
 #[test]
 fn username_casing_yields_same_principal_id() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -610,7 +610,7 @@ fn username_casing_yields_same_principal_id() {
     );
 }
 
-/// Finding #8: an oversized `memberOf` is capped so a hostile directory cannot exhaust memory.
+/// An oversized `memberOf` is capped so a hostile directory cannot exhaust memory.
 #[test]
 fn group_values_are_capped() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -627,7 +627,7 @@ fn group_values_are_capped() {
     assert_eq!(p.roles.len(), 4096, "group values must be capped at 4096");
 }
 
-// ── Round-2 finding #3: every Directory→Reject branch actually rejects ────────────────────────────
+// ── every Directory→Reject branch actually rejects ───────────────────────────────────────────────
 // The fake now injects transport errors, so each operational-failure branch is exercised and proven
 // to yield `Directory` (which `complete_login` maps to `Reject`) — never `Identify`.
 
@@ -705,7 +705,7 @@ fn group_read_error_rejects() {
     assert!(matches!(r, Err(BindError::Directory(_))), "got {r:?}");
 }
 
-// ── Round-2 finding #4: the search-then-bind path validates username / resolved DN ────────────────
+// ── the search-then-bind path validates username / resolved DN ───────────────────────────────────
 
 /// An EMPTY username in the search path must be rejected — even when an entry would otherwise match
 /// — instead of proceeding to a bind. (Without the guard the matching entry below yields `Identify`.)
@@ -747,7 +747,7 @@ fn search_path_rejects_empty_resolved_dn() {
     );
 }
 
-/// Round-2 finding #5: `principal_id` must be Unicode-aware. `to_ascii_lowercase` leaves non-ASCII
+/// `principal_id` must be Unicode-aware. `to_ascii_lowercase` leaves non-ASCII
 /// letters untouched, so two Unicode casings of the same name mint two distinct `ldap:` principals.
 /// A Unicode-aware `to_lowercase` collapses them to one canonical id.
 #[test]
