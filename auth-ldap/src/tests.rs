@@ -461,6 +461,21 @@ struct FakeLdap {
     group_attr: String,
     /// Every bind DN attempted, in order.
     binds: Vec<String>,
+    /// Every search filter the module actually sent, in order.
+    ///
+    /// The fake used to discard the filter argument, which meant the RFC 4515 escaping was tested
+    /// only as a pure function and never AS APPLIED — deleting the `escape_filter` call at the call
+    /// site left every test green while opening LDAP filter injection. See
+    /// `the_user_search_filter_is_escaped_as_applied_not_just_in_isolation`.
+    filters: Vec<String>,
+    /// Every bind attempted as `(dn, password)`, in order.
+    ///
+    /// The DN alone is not enough to catch the sharpest failure this module could have: on the
+    /// search-then-bind path, binding the USER's DN with the SERVICE account's password would
+    /// authenticate anyone who merely exists in the directory, and a fake that records only DNs
+    /// cannot tell that apart from a correct bind. See
+    /// `search_then_bind_authenticates_with_the_submitted_password`.
+    bind_pairs: Vec<(String, String)>,
     /// Set once `unbind` is called.
     unbound: bool,
     /// Inject a TRANSPORT failure (`Err`) from `simple_bind` when the bind DN equals this — models a
@@ -476,6 +491,7 @@ struct FakeLdap {
 impl LdapBackend for FakeLdap {
     fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, String> {
         self.binds.push(dn.to_string());
+        self.bind_pairs.push((dn.to_string(), password.to_string()));
         if self.bind_err_on.as_deref() == Some(dn) {
             return Err(format!("transport failure binding {dn}"));
         }
@@ -491,12 +507,13 @@ impl LdapBackend for FakeLdap {
         &mut self,
         _base: &str,
         scope: SearchScope,
-        _filter: &str,
+        filter: &str,
         _attrs: &[&str],
     ) -> Result<Vec<DirEntry>, String> {
         match scope {
             // search-then-bind user lookup
             SearchScope::Subtree => {
+                self.filters.push(filter.to_string());
                 if self.subtree_err {
                     return Err("transport failure on user search".to_string());
                 }
@@ -786,4 +803,98 @@ fn unicode_username_casing_yields_same_principal_id() {
         principal_id("cn=ÉLODIE,dc=x"),
         principal_id("cn=élodie,dc=x")
     );
+}
+
+/// On the search-then-bind path, the USER bind must present the SUBMITTED password.
+///
+/// This is the sharpest failure this module could have and it was untested. The service account
+/// binds first, to find the user's entry; if the second bind reused the SERVICE password instead of
+/// the end user's, every bind would succeed for anyone who merely exists in the directory — a full
+/// authentication bypass, with the correct DN, the correct groups, and a completely normal-looking
+/// principal coming back. The old fake recorded only bind DNs, so that substitution was invisible to
+/// every existing test: they all still passed.
+///
+/// Asserts the ORDER and the CREDENTIALS of both binds, so neither "the service bind was skipped"
+/// nor "the user bind used the wrong secret" can slip through.
+#[test]
+fn search_then_bind_authenticates_with_the_submitted_password() {
+    let m = LdapModule::new(search_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        search_entries: vec![DirEntry {
+            dn: "CN=Alice,OU=People,DC=corp,DC=example".to_string(),
+            attrs: HashMap::new(),
+        }],
+        group_attr: "memberOf".to_string(),
+        ..Default::default()
+    };
+    m.bind_and_identify_on(&mut fake, "Alice", "alices-own-password")
+        .expect("bind should succeed");
+
+    assert_eq!(
+        fake.bind_pairs.len(),
+        2,
+        "search-then-bind is exactly two binds: service, then user: {:?}",
+        fake.bind_pairs
+    );
+    let (svc_dn, svc_pw) = &fake.bind_pairs[0];
+    let (user_dn, user_pw) = &fake.bind_pairs[1];
+
+    assert_eq!(svc_dn, "cn=svc,dc=corp,dc=example");
+    assert_eq!(
+        svc_pw, "svc-secret",
+        "the FIRST bind is the service account, with the service password"
+    );
+
+    assert_eq!(user_dn, "CN=Alice,OU=People,DC=corp,DC=example");
+    assert_eq!(
+        user_pw, "alices-own-password",
+        "the SECOND bind must present the END USER's submitted password — reusing the service \
+         password here authenticates anyone who exists in the directory"
+    );
+    assert_ne!(
+        user_pw, svc_pw,
+        "the user bind must not reuse the service credential"
+    );
+}
+
+/// The RFC 4515 escaping must hold AS APPLIED, not merely as a pure function.
+///
+/// `escape_filter` had its own unit test, but the fake backend discarded the filter argument, so
+/// deleting the `escape_filter` call at the call site left every test in this file green. That is
+/// LDAP filter injection: a username like `*)(uid=*` would close the intended filter and open a
+/// wildcard, turning "find this one user" into "match everything" — and on a directory where the
+/// search then returns a single entry, into binding as somebody else entirely.
+///
+/// The module's own ambiguity guard limits the damage (more than one match is rejected), which is
+/// exactly why this needs its own test: the guard would mask the injection rather than reveal it.
+#[test]
+fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
+    let m = LdapModule::new(search_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        search_entries: vec![DirEntry {
+            dn: "CN=Alice,OU=People,DC=corp,DC=example".to_string(),
+            attrs: HashMap::new(),
+        }],
+        group_attr: "memberOf".to_string(),
+        ..Default::default()
+    };
+    // Every metacharacter RFC 4515 requires escaping, in one username.
+    let hostile = r"*)(uid=*))(|(x=\ ";
+    let _ = m.bind_and_identify_on(&mut fake, hostile, "pw");
+
+    let sent = fake
+        .filters
+        .first()
+        .expect("the module must have issued a user search");
+    assert!(
+        !sent.contains("*)(uid=*"),
+        "the injection payload reached the directory verbatim -- the filter is not escaped at the \
+         call site: {sent}"
+    );
+    for esc in ["\\2a", "\\28", "\\29", "\\5c"] {
+        assert!(
+            sent.contains(esc),
+            "expected the {esc} escape in the applied filter: {sent}"
+        );
+    }
 }

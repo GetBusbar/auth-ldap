@@ -247,6 +247,23 @@ impl LdapModule {
                 cfg.url
             ));
         }
+        // The opt-out is honoured, but never SILENTLY. An operator who copies a lab config into
+        // production otherwise sends every end-user password in cleartext for the life of the
+        // deployment with nothing anywhere saying so — the setting is a one-line boolean and the
+        // consequence is invisible.
+        //
+        // This is a `tracing` call, which used to go nowhere from inside a cdylib (its own
+        // dispatcher, unjoined to the host's). The SDK now forwards this plugin's dispatcher into
+        // the host log sink, so it genuinely reaches the operator's logs.
+        if is_insecure_transport(&cfg.url, cfg.start_tls) {
+            tracing::warn!(
+                module = "ldap",
+                url = %cfg.url,
+                "allow_insecure_transport is set: binds run over plaintext ldap:// to a \
+                 non-loopback host, so the service-account AND every end-user password cross the \
+                 network in cleartext"
+            );
+        }
         Ok(Self { cfg })
     }
 
