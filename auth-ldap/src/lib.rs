@@ -135,7 +135,7 @@ pub struct LdapConfig {
     /// so the plugin never sees it. There is no equivalent seam for a plugin that must present a
     /// *service-account* secret on a socket it opens itself — this is a raw string here, so the
     /// bind-service password would arrive as plaintext in the opaque settings blob (no core-side
-    /// secret resolution for plugin-opened connections). See README gap #5.
+    /// secret resolution for plugin-opened connections). See README Gap 5.
     #[serde(default)]
     pub bind_service_password: Option<SecretString>,
 

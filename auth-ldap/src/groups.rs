@@ -5,7 +5,7 @@
 //! places a username crosses into an LDAP wire syntax (a DN template, a search filter). These carry
 //! no I/O, so they are fully unit-tested — the LDAP bind itself needs a live directory.
 //!
-//! ## The group → role mapping gap (README gap #6)
+//! ## The group → role mapping gap (README, Gap 6)
 //!
 //! LDAP/AD groups are DNs: `CN=engineers,OU=Groups,DC=corp,DC=example`. A [`Principal`]'s `roles`
 //! (wire `Identity.groups`) is a `Vec<String>` and `auth.role_bindings.ldap` keys policy on those
