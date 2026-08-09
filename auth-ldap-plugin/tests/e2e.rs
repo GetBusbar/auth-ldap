@@ -323,6 +323,14 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     )
     .unwrap();
 
+    // busbar 1.5.3 retired both `auth.methods:` and INLINE entries under `auth.admin_auth:`: an
+    // identity provider is now defined ONCE under `identity-providers:` (its `browser_login` and
+    // `settings` hanging off that one definition) and referenced elsewhere by bare name. A config
+    // still carrying the old shape is not merely deprecated — core recognises it as a 1.x config
+    // and refuses to start at all, so this fixture described a gateway that could never boot and
+    // the test failed a long way from the cause, as `busbar exited early during health poll: exit
+    // status: 1`. The shape below is what core's own `--migrate-config` produces for the previous
+    // fixture, then confirmed by feeding the rendered YAML back through `busbar --validate`.
     let config = work.join("config.yaml");
     std::fs::write(
         &config,
@@ -330,11 +338,15 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
             "listen: \"127.0.0.1:{data_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
              auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
-             \x20 admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
-             \x20 methods:\n    ldap:\n      browser_login: {{}}\n      url: \"{url}\"\n\
+             \x20 admin_auth: [admin-tokens]\n\
+             \x20 role_bindings:\n    ldap:\n      admins:\n        group: eng-team\n\
+             identity-providers:\n\
+             \x20 admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             \x20 ldap:\n    module: ldap\n\
+             \x20   settings:\n      url: \"{url}\"\n\
              \x20     bind_dn_template: \"uid={{username}},ou=people,dc=example,dc=org\"\n\
              \x20     base_dn: \"dc=example,dc=org\"\n      group_attr: \"seeAlso\"\n      role_from: cn\n\
-             \x20 role_bindings:\n    ldap:\n      admins:\n        group: eng-team\n\
+             \x20   browser_login: {{}}\n\
              plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
              groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
              \x20   child_default:\n      limits:\n        - {{ budget: 5000, per: month }}\n        - {{ requests: 1000, per: day }}\n\

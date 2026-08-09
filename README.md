@@ -4,12 +4,12 @@
 This repo is an AD/LDAP auth plugin for busbar. It **began as a design-validation exercise** that stress-tested
 the 1.5.2 `LoginModule` ABI (`crates/api/src/auth.rs`) against the one auth flavor that exercises the
 **credential path** (username/password) **and opens its own socket** — unlike OIDC/GitHub, which are all
-redirect + core-executes-HTTP-hop. The three blocking gaps it surfaced (**#1** credential form, **#2**
-redirect-vs-credential classification, **#3** password redaction) then **LANDED in the frozen auth ABI v2**, and
+redirect + core-executes-HTTP-hop. The three blocking gaps it surfaced (**Gap 1** credential form, **Gap 2**
+redirect-vs-credential classification, **Gap 3** password redaction) then **LANDED in the frozen auth ABI v2**, and
 this plugin now implements the **full LDAP credential flow** against it (`login_kind() = Credential`,
 `begin_login → Prompt(LoginForm{username,password})`, `complete_login` reads the `submitted` map, BINDs,
 `Identify`). The gap list below is kept as the record of that analysis, each blocking gap now annotated
-**✅ RESOLVED (v2)**; only the additive-later items (#4-async, #5, #6, #7) remain open, marked `// ABI GAP:`
+**✅ RESOLVED (v2)**; only the additive-later items (Gap 4-async, Gap 5, Gap 6, Gap 7) remain open, marked `// ABI GAP:`
 in-source.
 
 ## The intended LDAP flow
@@ -23,7 +23,7 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 
 ## GAP LIST (ranked)
 
-### 🔴 GAP #1 — No `LoginOutcome` variant to render a credential FORM  ·  **✅ RESOLVED (v2)**
+### 🔴 Gap 1 — No `LoginOutcome` variant to render a credential FORM  ·  **✅ RESOLVED (v2)**
 > Landed as `LoginOutcome::Prompt(LoginForm{ fields: Vec<LoginField{ name, label, kind: FieldKind::{Text,Password}, required }> })` (+ wire mirror in `plugin-abi`). `begin_login` now returns `Prompt([username(Text), password(Password)])`; the core renders it and POSTs the values back. Original analysis below.
 
 - **What LDAP needs:** `begin_login` must tell the hosted login page to render a **username/password form** and
@@ -52,7 +52,7 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   Adding a variant later is a **breaking change** for every plugin/loader match arm. If credential login is a
   supported shape at all, the variant must exist before the ABI freezes. This is the single 1.5.2-blocking gap.
 
-### 🔴 GAP #2 — The chooser can't classify credential-vs-redirect, and the login-button config is OAuth-only  ·  **✅ RESOLVED (v2)**
+### 🔴 Gap 2 — The chooser can't classify credential-vs-redirect, and the login-button config is OAuth-only  ·  **✅ RESOLVED (v2)**
 > Landed as `enum LoginKind { Redirect, Credential }` + a pure `fn login_kind(&self) -> LoginKind` (default `Redirect`) the chooser reads at load without side effects, plus `client_secret: Option<SecretRef>` (was required) validated per kind — `Credential` methods must have it ABSENT. LDAP returns `login_kind() = Credential` and carries no `client_secret`. Original analysis below.
 
 - **What LDAP needs:** with `oidc` (redirect) + `ldap` (credential) both configured, the chooser must know
@@ -60,7 +60,7 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   ldap button at all.
 - **Why the ABI can't express it:** (a) `LoginModule` exposes only `begin_login`/`complete_login`; there is **no
   capability/classification method** and no way to know a method is credential-shaped without calling
-  `begin_login` — which for LDAP just fails closed (GAP #1). (b) The gate that decides a plugin can serve the
+  `begin_login` — which for LDAP just fails closed (Gap 1). (b) The gate that decides a plugin can serve the
   browser flow is purely `abi_version >= 2` (`crates/plugin-loader/src/registry.rs`); it says *login-capable*,
   not *redirect vs form*. (c) Structurally worse: what makes a method render a button is the **presence of the
   `browser_login:` config block** (`BrowserLoginCfg` in `crates/busbar/src/config/mod.rs`), and that block
@@ -80,7 +80,7 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 - **Why 1.5.2:** making `client_secret` optional and adding the kind after the ABI freezes changes a required
   field and the login-config contract — both breaking for a released config schema.
 
-### 🟠 GAP #3 — The password crosses to the plugin with no redaction  ·  **✅ RESOLVED (v2)**
+### 🟠 Gap 3 — The password crosses to the plugin with no redaction  ·  **✅ RESOLVED (v2)**
 > Landed as `CompleteLogin.submitted: Vec<(String, Redacted<String>)>` (subsuming the old ad-hoc `username`/`password`). Values ride `Redacted` (Debug/Display print `***`, `Zeroize` on drop) on the engine side; the plugin exposes them via `expose_secret()` only at the single documented `complete_login` boundary for the bind. Original analysis below.
 
 - **What LDAP needs:** the password *must* cross to the plugin (only the plugin can BIND). It must not be
@@ -101,9 +101,9 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   can't-accidentally-leak property the secret path already has.
 - **Why ideally 1.5.2:** changing the field type is breaking; doing it post-freeze is a second breaking change.
   Cheap to land now. (If deferred, it's *mitigable* by convention — "never `Debug` the request" — so it is a
-  notch below #1/#2, but the structural fix belongs with the ABI.)
+  notch below Gap 1 and Gap 2, but the structural fix belongs with the ABI.)
 
-### 🟢 GAP #4 — Plugin-opens-socket: **NOT a gap.** (Verified allowed.)
+### 🟢 Gap 4 — Plugin-opens-socket: **NOT a gap.** (Verified allowed.)
 - Auth plugins load over the **exact same six-symbol dlopen path** as store/secret/hook plugins
   (`export_login_plugin!` → `export_plugin!`, `crates/plugin-sdk/src/lib.rs`); the loader has **no sandbox, no
   seccomp, no network broker** — it runs the cdylib in-process. `hashicorp-vault` opens its own blocking HTTPS
@@ -117,7 +117,7 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   `// ABI GAP (async):` in `complete_login`. Additive-later (a host-side convention / a documented threading
   contract fixes it without changing the ABI types).
 
-### 🟢 GAP #5 — LDAPS/TLS, CA, bind-DN template, base-DN, group attr: **mostly fit; one small secret-ref gap**
+### 🟢 Gap 5 — LDAPS/TLS, CA, bind-DN template, base-DN, group attr: **mostly fit; one small secret-ref gap**
 - URL, `bind_dn_template`, `base_dn`, `group_attr`, `ca_cert_pem`, `start_tls`, `role_from`, timeouts all fit in
   the method's **opaque `settings` map** (`AuthMethodCfg { #[serde(flatten)] settings }`) — the engine never
   needs to understand them. This is the same clean opaque-config seam OIDC and Vault use. **No ABI gap.**
@@ -128,7 +128,7 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   (`// ABI GAP (secret-ref)` in `LdapConfig`). Additive-later: extend the settings-resolution path to expand
   `SecretRef`s inside opaque plugin settings before `open()`.
 
-### 🟢 GAP #6 — Group DN → role normalization is pushed entirely onto the plugin  ·  **additive-later**
+### 🟢 Gap 6 — Group DN → role normalization is pushed entirely onto the plugin  ·  **additive-later**
 - LDAP/AD groups are **DNs** (`CN=engineers,OU=Groups,DC=corp,DC=example`). `Principal.roles` (wire
   `Identity.groups`) is `Vec<String>` and `auth.role_bindings.ldap` keys policy on those strings, so a DN
   *works* verbatim — **the type fits**. But a DN is a hostile `role_bindings` key: commas + `=` (awkward YAML
@@ -136,12 +136,12 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   normalization, so the plugin must choose the shape — this crate's `RoleFrom::{Cn,Dn}` (default `Cn`, tested).
   Not an ABI blocker; an engine-side DN-normalizing role mapper would be a nice additive-later ergonomic.
 
-### 🟠 GAP #7 — No verdict distinct from `Reject` for "wrong password (retry)" vs "directory down"  ·  additive-later
+### 🟠 Gap 7 — No verdict distinct from `Reject` for "wrong password (retry)" vs "directory down"  ·  additive-later
 - On a login form, a wrong password should re-render the form ("try again"); a directory outage is a 5xx
   ("try later"). `LoginOutcome` collapses both into `Reject` (fail-closed, stop the chain) — there is no
   `Retry`/`Error` verdict, so `complete_login` squashes an outage into the same result as a bad credential
   (marked inline; we log the operational detail, never the credential). Additive-later — a new terminal variant
-  is only additive if `LoginOutcome` is already being reopened for GAP #1 (in which case land it together).
+  is only additive if `LoginOutcome` is already being reopened for Gap 1 (in which case land it together).
 
 ---
 
@@ -153,8 +153,8 @@ credential check) → on success reads the user's groups (`memberOf`) → return
 - **`Identify(Principal{ id, roles, ttl_secs })`** maps to LDAP 1:1: `id = "ldap:<uid>"`, `roles = groups`,
   `ttl_secs` for the identity cache. `Identity ↔ Principal` (`groups ↔ roles`) is lossless.
 - **`cacheable() = true`** is exactly the documented "real I/O per call" case — the engine caches the identity.
-- **Plugin-opens-socket is allowed** (GAP #4) — no sandbox; same in-process dlopen as vault.
-- **Opaque `settings`** carry every LDAP knob without the engine understanding any of them (GAP #5).
+- **Plugin-opens-socket is allowed** (Gap 4) — no sandbox; same in-process dlopen as vault.
+- **Opaque `settings`** carry every LDAP knob without the engine understanding any of them (Gap 5).
 - **`authenticate` → `Pass`** cleanly models "LDAP is a login method, not a data-plane bearer verifier" — it
   defers and the chain continues.
 
@@ -168,8 +168,8 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   bind), opens its OWN LDAP socket, BINDs, reads groups, `Identify`. No `client_secret` (structurally absent).
 - **Real LDAP BIND + group read** via `ldap3` (sync, rustls TLS), incl. direct-bind and search-then-bind,
   LDAPS/STARTTLS, and DN→role mapping.
-- **Remaining `// ABI GAP:` markers** are the additive-later items only (#5 secret-ref for the service-account
-  password; #4-async sync/blocking I/O).
+- **Remaining `// ABI GAP:` markers** are the additive-later items only (Gap 5 secret-ref for the service-account
+  password; Gap 4-async sync/blocking I/O).
 - **Tests: 22 passing** (18 lib + 4 plugin). Cover config parse + `deny_unknown_fields` incl. **client_secret
   rejected**, bind-DN templating + **LDAP-injection rejection**, RFC4515 filter escaping, group-DN → role
   mapping (CN/DN, dedup, escaped commas), the `authenticate` defer, `login_kind() = Credential`, the
@@ -177,9 +177,9 @@ credential check) → on success reads the user's groups (`memberOf`) → return
   and `complete_login` credential guards (missing/empty). The live-bind happy path is integration-only.
 
 ## Recommendation
-**The three 1.5.2-blocking gaps LDAP surfaced (#1 credential form, #2 redirect-vs-credential classification, #3
+**The three 1.5.2-blocking gaps LDAP surfaced (Gap 1 credential form, Gap 2 redirect-vs-credential classification, Gap 3
 password redaction) all landed in the frozen auth ABI v2** — `LoginOutcome::Prompt(LoginForm)`, a pure
 `login_kind()` classifier with `client_secret` made `Optional` + per-kind validated, and the generic
 `submitted: Vec<(String, Redacted<String>)>` transport. This plugin now implements the full flow against them
-with zero remaining blockers. GAP #4-async, #5-secret-ref, #6, #7 stay **additive-later** and do not block the
+with zero remaining blockers. Gap 4-async, Gap 5-secret-ref, Gap 6 and Gap 7 stay **additive-later** and do not block the
 freeze.
