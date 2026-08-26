@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # auth-ldap
 
+[![Coverage](https://codecov.io/gh/GetBusbar/auth-ldap/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/auth-ldap)
+
 The first-party, signed `kind: auth` plugin for
 [busbar](https://getbusbar.com) that authenticates a username and
 password against an AD/LDAP directory: a real LDAP/LDAPS **BIND** as the

@@ -24,3 +24,45 @@ jobs:
       service: openldap
       # 1.5.2 auth ABI v2 + hosted GET /auth/token flow live on busbar `dev`, not yet `main` — build
       # the sibling against dev so the plugin + its live e2e compile and run. Flip to main at 1.5.2 ship.
+
+  # ── coverage (llvm-cov · codecov): ADDITIVE and non-required. This job is NOT part of the reusable
+  # plugin-ci gate above and is wired into no required status — a coverage upload can never block a PR
+  # (codecov-action fail_ci_if_error:false + codecov.yml informational). It mirrors the plugin-ci
+  # `service: openldap` backend and BUSBAR_TEST_LDAP_URL so the live e2e (tests/e2e.rs) is exercised
+  # under llvm-cov, then uploads workspace lcov to Codecov.
+  coverage:
+    name: coverage (llvm-cov · codecov)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || contains(fromJSON('["refs/heads/main", "refs/heads/dev", "refs/heads/qa"]'), github.ref)
+    services:
+      # Ready-made OpenLDAP the auth-ldap e2e binds against — mirrors plugin-ci.yml's openldap service,
+      # PINNED by digest. tests/e2e.rs seeds the test user/group over LDAP and retries the admin bind
+      # until the container is ready. Exposed to the coverage step via BUSBAR_TEST_LDAP_URL below.
+      openldap:
+        image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
+        env:
+          LDAP_ORGANISATION: Example Org
+          LDAP_DOMAIN: example.org
+          LDAP_ADMIN_PASSWORD: adminpassword
+        ports:
+          - 389:389
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage (workspace, live LDAP e2e wired)
+        env:
+          BUSBAR_TEST_LDAP_URL: ldap://127.0.0.1:389
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Upload to Codecov (tokenless; never fails the build)
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          slug: GetBusbar/auth-ldap
+          fail_ci_if_error: false
