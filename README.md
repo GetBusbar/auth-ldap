@@ -1,6 +1,10 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # busbar-auth-ldap — AD/LDAP auth module (1.5.2 LoginModule ABI stress-test)
 
+[![CI](https://github.com/GetBusbar/auth-ldap/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/auth-ldap/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/GetBusbar/auth-ldap/branch/main/graph/badge.svg)](https://codecov.io/gh/GetBusbar/auth-ldap)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 This repo is an AD/LDAP auth plugin for busbar. It **began as a design-validation exercise** that stress-tested
 the 1.5.2 `LoginModule` ABI (`crates/api/src/auth.rs`) against the one auth flavor that exercises the
 **credential path** (username/password) **and opens its own socket** — unlike OIDC/GitHub, which are all
