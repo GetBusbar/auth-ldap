@@ -7,7 +7,7 @@
 #   - auth-ldap-plugin: the thin dlopen cdylib adapter (export_login_plugin!).
 #
 # Only busbar-api / busbar-plugin-sdk (and the plugin's dev-deps: busbar-plugin-loader/abi) reach into
-# a sibling busbarAI checkout — INTERIM local path deps, same pattern as auth-oidc / hashicorp-vault.
+# a sibling busbar checkout — INTERIM local path deps, same pattern as auth-oidc / hashicorp-vault.
 #
 # Requires auth ABI v2, the version carrying the credential login flow: login_kind()=Credential,
 # begin_login returns Prompt(LoginForm{username,password}), and complete_login reads the submitted map

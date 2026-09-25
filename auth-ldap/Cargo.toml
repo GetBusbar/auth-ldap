@@ -9,7 +9,7 @@ description = "The AD/LDAP auth module for busbar: BIND a username/password agai
 license = "Apache-2.0"
 
 [dependencies]
-# INTERIM local path dep into a sibling busbarAI checkout. Once busbarAI ships publicly this becomes a
+# INTERIM local path dep into a sibling busbar checkout. Once busbar ships publicly this becomes a
 # pinned git/crates.io dep, same as auth-oidc / hashicorp-vault.
 busbar-api = { path = "../../busbar/crates/api" }
 serde = { version = "1", features = ["derive"] }

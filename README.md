@@ -177,8 +177,8 @@ and for a loopback host.
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
-until [busbarAI](https://github.com/GetBusbar/busbar) ships publicly —
-a sibling checkout of `busbarAI` at `../busbarAI` (see
+until [busbar](https://github.com/GetBusbar/busbar) ships publicly —
+a sibling checkout of `busbar` at `../busbar` (see
 [Dependencies](#dependencies) below).
 
 ```sh
@@ -195,21 +195,21 @@ checkout is needed for the LDAP logic itself; `auth-ldap-plugin` depends
 on it as a normal workspace path dependency (`../auth-ldap`).
 
 The remaining dependencies reach into the
-[busbarAI](https://github.com/GetBusbar/busbar) monorepo: `busbar-api`
+[busbar](https://github.com/GetBusbar/busbar) monorepo: `busbar-api`
 (needed by both crates), `busbar-plugin-sdk` (`auth-ldap-plugin` only),
 and, as a dev-dependency for the end-to-end test,
-`busbar-plugin-loader`. Because busbarAI is not yet public, both crates'
+`busbar-plugin-loader`. Because busbar is not yet public, both crates'
 `Cargo.toml` point at these as **local path dependencies**
-(`../../busbarAI/crates/...`), which means this repo expects to be
-checked out as a sibling of `busbarAI`:
+(`../../busbar/crates/...`), which means this repo expects to be
+checked out as a sibling of `busbar`:
 
 ```
 some-parent-dir/
-├── busbarAI/
+├── busbar/
 └── auth-ldap/          # this repo — the auth-ldap/ + auth-ldap-plugin/ workspace
 ```
 
-This is an interim measure — once busbarAI ships publicly, these should
+This is an interim measure — once busbar ships publicly, these should
 become git (pinned rev/tag) or crates.io dependencies instead. Grep both
 crates' `Cargo.toml` for the `INTERIM` comments when doing that
 migration.
@@ -219,7 +219,7 @@ migration.
 Once built, the cdylib is packed and signed like any other busbar plugin
 — see
 [`docs/plugins.md`](https://github.com/GetBusbar/busbar/blob/main/docs/plugins.md#signing-and-packaging)
-in busbarAI for the full reference. In short:
+in busbar for the full reference. In short:
 
 ```sh
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \

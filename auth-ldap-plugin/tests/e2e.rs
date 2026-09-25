@@ -11,7 +11,7 @@
 //! `BUSBAR_TEST_LDAP_URL` (mirrors the store plugins' `BUSBAR_TEST_POSTGRES_URL`). The container
 //! auto-creates the base suffix + admin from its own env; this test seeds the test user/group over
 //! LDAP itself (`ldap3`, the same client the plugin uses) — the CI-service equivalent of feeding
-//! busbarAI/scripts/fixtures/auth-ldap/seed.ldif, kept in-test so the plugin's CI is self-contained.
+//! busbar/scripts/fixtures/auth-ldap/seed.ldif, kept in-test so the plugin's CI is self-contained.
 //!
 //! GATING: `BUSBAR_TEST_LDAP_URL` unset ⇒ SKIP loudly (local, no docker) — never a silent pass.
 //! Under CI the plugin-ci `service: openldap` arm sets it and the test RUNS.
@@ -31,28 +31,45 @@ fn ldap_url() -> Option<String> {
     }
 }
 
-fn busbarai_root() -> std::path::PathBuf {
+fn busbar_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../busbarAI")
+        .join("../../busbar")
         .canonicalize()
-        .expect("sibling busbarAI checkout must exist (see Cargo.toml path deps)")
+        .expect("sibling busbar checkout must exist (see Cargo.toml path deps)")
 }
 
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
-    let root = busbarai_root();
-    let status = std::process::Command::new("cargo")
-        .args([
+    let root = busbar_root();
+    // Two invocations, exactly as plugin-ci.yml builds them: in busbar 1.6.0 `busbar-plugin-pack` is
+    // a feature-gated bin of the `busbar-plugin-sdk` package (`--features pack`), not a package of
+    // its own, and building it separately keeps the `pack` feature out of the `busbar` build.
+    for args in [
+        &["build", "--release", "-p", "busbar", "--bin", "busbar"][..],
+        &[
             "build",
             "--release",
             "-p",
-            "busbar",
-            "-p",
+            "busbar-plugin-sdk",
+            "--features",
+            "pack",
+            "--bin",
             "busbar-plugin-pack",
-        ])
-        .current_dir(&root)
-        .status()
-        .expect("run cargo build for busbar + busbar-plugin-pack");
-    assert!(status.success(), "building the real binaries must succeed");
+        ][..],
+    ] {
+        let status = std::process::Command::new("cargo")
+            .args(args)
+            .current_dir(&root)
+            // The binaries are read back from `<sibling>/target/release` below, so the build must
+            // land there: an inherited CARGO_TARGET_DIR (set for the outer `cargo test`) would
+            // redirect it into the plugin's own target dir.
+            .env_remove("CARGO_TARGET_DIR")
+            .status()
+            .expect("run cargo build for busbar / busbar-plugin-pack");
+        assert!(
+            status.success(),
+            "building the real busbar + busbar-plugin-pack binaries must succeed ({args:?})"
+        );
+    }
     (
         root.join("target/release/busbar"),
         root.join("target/release/busbar-plugin-pack"),

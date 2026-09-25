@@ -47,16 +47,38 @@ jobs:
         ports:
           - 389:389
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout the plugin
+        uses: actions/checkout@v7
+        with:
+          path: plugin
+      # The workspace's Cargo.toml path-deps reach into a sibling busbar checkout (../../busbar) for
+      # busbar-api / busbar-plugin-sdk / busbar-plugin-loader, and tests/e2e.rs builds the real busbar
+      # + busbar-plugin-pack binaries from it, so the plugin cannot compile or run its e2e without it.
+      # Pinned to field 1 of .busbar-ref — what Cargo.lock resolved against, so `--locked` holds.
+      - name: Resolve busbar ref from .busbar-ref
+        id: ref
+        run: echo "sha=$(cut -d' ' -f1 plugin/.busbar-ref)" >> "$GITHUB_OUTPUT"
+      - name: Checkout busbar (sibling path dependency, pinned to .busbar-ref)
+        uses: actions/checkout@v7
+        with:
+          repository: GetBusbar/busbar
+          ref: ${{ steps.ref.outputs.sha }}
+          path: busbar
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          # Both checkouts use `path:`, so the two Cargo workspaces live at plugin/ and busbar/.
+          workspaces: |
+            plugin
+            busbar
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage (workspace, live LDAP e2e wired)
+        working-directory: plugin
         env:
           BUSBAR_TEST_LDAP_URL: ldap://127.0.0.1:389
         run: cargo llvm-cov --workspace --locked --ignore-run-fail --lcov --output-path lcov.info
@@ -64,6 +86,6 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
+          files: plugin/lcov.info
           slug: GetBusbar/auth-ldap
           fail_ci_if_error: false

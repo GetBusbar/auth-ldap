@@ -120,14 +120,15 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "busbar-api"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "async-trait",
+ "busbar-contract",
+ "busbar-secret-ref",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "zeroize",
 ]
 
 [[package]]
@@ -156,7 +157,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "busbar-plugin-abi"
+name = "busbar-contract"
+version = "1.6.0"
+dependencies = [
+ "futures",
+ "serde",
+ "smallvec",
+ "zeroize",
+]
+
+[[package]]
+name = "busbar-kernel-ledger"
+version = "1.6.0"
+dependencies = [
+ "busbar-contract",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "busbar-kernel-wal"
+version = "1.6.0"
+dependencies = [
+ "busbar-contract",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "busbar-plugin"
 version = "1.5.0"
 dependencies = [
  "busbar-api",
@@ -170,14 +197,19 @@ version = "1.5.0"
 dependencies = [
  "async-trait",
  "busbar-api",
- "busbar-plugin-abi",
- "busbar-plugin-sign",
+ "busbar-contract",
+ "busbar-kernel-ledger",
+ "busbar-kernel-wal",
+ "busbar-plugin",
+ "ed25519-dalek",
  "flate2",
  "getrandom 0.3.4",
+ "hex",
  "libc",
  "libloading",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tar",
  "tokio",
  "tracing",
@@ -188,19 +220,18 @@ name = "busbar-plugin-sdk"
 version = "1.5.0"
 dependencies = [
  "busbar-api",
- "busbar-plugin-abi",
+ "busbar-plugin",
  "serde_json",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]
-name = "busbar-plugin-sign"
+name = "busbar-secret-ref"
 version = "1.5.0"
 dependencies = [
- "ed25519-dalek",
- "hex",
  "serde",
  "serde_json",
- "sha2 0.11.0",
 ]
 
 [[package]]
@@ -913,9 +944,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libloading"
-version = "0.8.9"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
@@ -1909,6 +1940,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
 ]
 
 [[package]]
@@ -1964,6 +1996,12 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "version_check"
