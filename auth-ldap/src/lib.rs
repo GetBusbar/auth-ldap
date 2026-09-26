@@ -11,7 +11,7 @@
 //! 3. The module opens an LDAP/LDAPS socket to the directory and performs a **BIND** with the
 //!    user's DN + password (this is the credential check — no token, no redirect).
 //! 4. On a successful bind it reads the user's group memberships (`memberOf`, or an AD group query)
-//!    and returns [`busbar_api::LoginOutcome::Identify`] with a [`Principal`] whose `roles` are the
+//!    and returns [`busbar_contract::auth::LoginOutcome::Identify`] with a [`Principal`] whose `roles` are the
 //!    group names, mapped to policy downstream by the operator's `auth.role_bindings.ldap`.
 //!
 //! ## Auth ABI v2 — the LDAP credential method
@@ -28,8 +28,8 @@
 //! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
 //!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
-use busbar_api::{
-    AuthModule, AuthOutcome, BeginLogin, CompleteLogin, FieldKind, LoginField, LoginForm,
+use busbar_contract::auth::{
+    AuthModule, AuthVerdict, BeginLogin, CompleteLogin, FieldKind, LoginField, LoginForm,
     LoginKind, LoginModule, LoginOutcome, Principal,
 };
 use core::fmt;
@@ -331,8 +331,8 @@ impl AuthModule for LdapModule {
 
     /// LDAP is a login (form) method, not a data-plane bearer verifier: it has no opaque credential
     /// shape to judge, so it always DEFERS. `Pass` keeps the auth chain moving to the next module.
-    fn authenticate(&self, _candidate: Option<&str>) -> AuthOutcome {
-        AuthOutcome::Pass
+    fn authenticate(&self, _candidate: Option<&str>) -> AuthVerdict {
+        AuthVerdict::Pass
     }
 
     /// A directory lookup over a socket per login — the engine may cache the resulting identity for
@@ -343,7 +343,7 @@ impl AuthModule for LdapModule {
 }
 
 /// Look up a submitted credential field by the `name` the plugin declared in its [`LoginForm`].
-/// This is the ONE place the [`Redacted`](busbar_api::Redacted) value is exposed as plaintext — the
+/// This is the ONE place the [`Redacted`](busbar_contract::Redacted) value is exposed as plaintext — the
 /// documented `complete_login` credential boundary (only the plugin can perform the bind). Callers
 /// must NOT log the result.
 fn submitted_field<'a>(req: &'a CompleteLogin, name: &str) -> Option<&'a str> {
@@ -364,7 +364,7 @@ impl LoginModule for LdapModule {
     /// Start browser login. LDAP has no external authorize URL — it returns a declarative
     /// [`LoginForm`] the core renders as a form and POSTs back. The fields are generic (the core
     /// renders whatever the plugin declares): `username` (Text) + `password` (Password, masked +
-    /// carried [`Redacted`](busbar_api::Redacted) on the wire). No PKCE/redirect is used.
+    /// carried [`Redacted`](busbar_contract::Redacted) on the wire). No PKCE/redirect is used.
     fn begin_login(&self, _req: &BeginLogin) -> LoginOutcome {
         LoginOutcome::Prompt(LoginForm {
             fields: vec![
@@ -390,7 +390,7 @@ impl LoginModule for LdapModule {
     ///
     /// It opens its OWN LDAP socket here — the loader runs this in-process with no sandbox (same
     /// six-symbol dlopen path as store/secret/vault plugins), so a plugin-opened socket is allowed.
-    /// The password crosses as a [`Redacted`](busbar_api::Redacted) value on the engine side and is
+    /// The password crosses as a [`Redacted`](busbar_contract::Redacted) value on the engine side and is
     /// exposed only via [`submitted_field`] for the bind; we never log `req` or the exposed values.
     fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
         let (Some(username), Some(password)) = (

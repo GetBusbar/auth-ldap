@@ -5,13 +5,14 @@ version = "0.1.0"
 publish = false
 edition = "2021"
 rust-version = "1.97"
-description = "The AD/LDAP auth module for busbar: BIND a username/password against an LDAP/LDAPS directory and map the user's group memberships (memberOf DNs) to a Principal. Implements busbar_api::AuthModule + busbar_api::LoginModule. Opens its own LDAP socket (like hashicorp-vault), unlike the core-executes-HTTP-hop model of auth-oidc."
+description = "The AD/LDAP auth module for busbar: BIND a username/password against an LDAP/LDAPS directory and map the user's group memberships (memberOf DNs) to a Principal. Implements busbar_contract::auth::AuthModule + LoginModule. Opens its own LDAP socket (like hashicorp-vault), unlike the core-executes-HTTP-hop model of auth-oidc."
 license = "Apache-2.0"
 
 [dependencies]
-# INTERIM local path dep into a sibling busbar checkout. Once busbar ships publicly this becomes a
-# pinned git/crates.io dep, same as auth-oidc / hashicorp-vault.
-busbar-api = { path = "../../busbar/crates/api" }
+# The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
+# `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
+# tree, so ONE copy of the contract links.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

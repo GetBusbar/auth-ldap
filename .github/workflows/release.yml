@@ -13,7 +13,7 @@
 #
 # The packed manifest's abi_version is the auth PAYLOAD schema version (kind: auth => 2, the 1.5.2
 # auth ABI). It is not set here: busbar-plugin-pack derives it from `--kind auth` against the
-# busbar-plugin-sdk this plugin builds against (AUTH_ABI_VERSION = 2).
+# busbar-contract this plugin builds against.
 name: release
 
 on:
@@ -159,9 +159,9 @@ jobs:
 
       - name: Build busbar-plugin-pack (from the sibling busbar checkout)
         working-directory: busbar
-        # busbar-plugin-pack is a [[bin]] of busbar-plugin-sdk (behind its `pack` feature), not its own
+        # busbar-plugin-pack is a [[bin]] of busbar-plugin-loader (behind its `pack` feature), not its own
         # package — the same invocation busbar's own plugin-ci.yml/docker.yml use.
-        run: cargo build --release --target ${{ matrix.target }} -p busbar-plugin-sdk --features pack --bin busbar-plugin-pack
+        run: cargo build --release --target ${{ matrix.target }} -p busbar-plugin-loader --features pack --bin busbar-plugin-pack
         shell: bash
 
       - name: Package + sign the plugin tarball

@@ -7,11 +7,11 @@
 
 use crate::groups::{escape_filter, first_cn, roles_from_group_dns, validate_username};
 use crate::{
-    principal_id, submitted_field, AuthModule, AuthOutcome, BeginLogin, BindError, CompleteLogin,
+    principal_id, submitted_field, AuthModule, AuthVerdict, BeginLogin, BindError, CompleteLogin,
     DirEntry, FieldKind, LdapBackend, LdapConfig, LdapModule, LoginForm, LoginKind, LoginModule,
     LoginOutcome, RoleFrom, SearchScope,
 };
-use busbar_api::Redacted;
+use busbar_contract::Redacted;
 use std::collections::HashMap;
 
 /// Build a `CompleteLogin` carrying the given credential fields in its `submitted` map (each value
@@ -352,8 +352,8 @@ fn roles_empty_when_no_groups() {
 fn authenticate_defers_ldap_is_login_only() {
     let m = LdapModule::new(base_cfg()).unwrap();
     // LDAP verifies no opaque bearer — it must Pass so the data-plane chain continues.
-    assert_eq!(m.authenticate(Some("some-token")), AuthOutcome::Pass);
-    assert_eq!(m.authenticate(None), AuthOutcome::Pass);
+    assert_eq!(m.authenticate(Some("some-token")), AuthVerdict::Pass);
+    assert_eq!(m.authenticate(None), AuthVerdict::Pass);
     assert_eq!(m.name(), "ldap");
     assert!(m.cacheable());
 }

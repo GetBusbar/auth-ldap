@@ -119,23 +119,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "busbar-api"
-version = "1.6.0"
-dependencies = [
- "async-trait",
- "busbar-contract",
- "busbar-secret-ref",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "busbar-auth-ldap"
 version = "0.1.0"
 dependencies = [
- "busbar-api",
+ "busbar-contract",
  "ldap3",
  "serde",
  "serde_json",
@@ -147,10 +134,9 @@ name = "busbar-auth-ldap-plugin"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "busbar-api",
  "busbar-auth-ldap",
+ "busbar-contract",
  "busbar-plugin-loader",
- "busbar-plugin-sdk",
  "ldap3",
  "reqwest",
  "serde_json",
@@ -159,16 +145,26 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
+ "async-trait",
  "futures",
+ "hex",
+ "http",
+ "memchr",
  "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "smallvec",
+ "tracing",
+ "tracing-core",
  "zeroize",
 ]
 
 [[package]]
 name = "busbar-kernel-ledger"
 version = "1.6.0"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "busbar-contract",
  "sha2 0.11.0",
@@ -177,32 +173,24 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-wal"
 version = "1.6.0"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "busbar-contract",
  "sha2 0.11.0",
 ]
 
 [[package]]
-name = "busbar-plugin"
-version = "1.5.0"
-dependencies = [
- "busbar-api",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "async-trait",
- "busbar-api",
  "busbar-contract",
  "busbar-kernel-ledger",
  "busbar-kernel-wal",
- "busbar-plugin",
  "ed25519-dalek",
  "flate2",
+ "futures",
  "getrandom 0.3.4",
  "hex",
  "libc",
@@ -213,25 +201,6 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "busbar-plugin-sdk"
-version = "1.5.0"
-dependencies = [
- "busbar-api",
- "busbar-plugin",
- "serde_json",
- "tracing",
- "tracing-core",
-]
-
-[[package]]
-name = "busbar-secret-ref"
-version = "1.5.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

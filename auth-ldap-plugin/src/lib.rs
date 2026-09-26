@@ -9,11 +9,11 @@
 //! Mirrors `auth-oidc-plugin`'s `open()` exactly — the only difference is it exports an
 //! [`busbar_auth_ldap::LdapModule`] (which opens its own LDAP socket) instead of the OIDC module.
 //! Because `LdapModule` implements BOTH `AuthModule` and `LoginModule`, it is exported through
-//! [`busbar_plugin_sdk::export_login_plugin!`] (NOT the verify-only `export_auth_plugin!`, which
+//! [`busbar_contract::export_login_plugin!`] (NOT the verify-only `export_auth_plugin!`, which
 //! would mask the login capability behind the fail-closed adapter).
 
-use busbar_api::AuthPlugin;
 use busbar_auth_ldap::{LdapConfig, LdapModule};
+use busbar_contract::auth::AuthPlugin;
 
 /// Construct an LDAP auth module from the JSON config the engine passes through `open` — the
 /// `auth.methods.ldap` opaque settings. Shape:
@@ -44,7 +44,7 @@ fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
     Ok(Box::new(LdapModule::new(cfg)?))
 }
 
-busbar_plugin_sdk::export_login_plugin!(open);
+busbar_contract::export_login_plugin!(open);
 
 #[cfg(test)]
 mod tests;

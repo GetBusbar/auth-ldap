@@ -31,25 +31,32 @@ fn ldap_url() -> Option<String> {
     }
 }
 
+/// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
+/// `BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref` field 1 (this repo's CI `e2e` job
+/// checks it out and sets the variable). This repo builds against busbar by git rev, not a sibling
+/// path, so the binaries' source is named explicitly. Unset ⇒ the live leg cannot run, and says so.
 fn busbar_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../busbar")
+    let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
+        "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
+         GetBusbar/busbar at .busbar-ref (ci.yml `e2e` sets it)",
+    );
+    std::path::PathBuf::from(dir)
         .canonicalize()
-        .expect("sibling busbar checkout must exist (see Cargo.toml path deps)")
+        .expect("BUSBAR_CHECKOUT names an existing busbar checkout")
 }
 
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
-    // Two invocations, exactly as plugin-ci.yml builds them: in busbar 1.6.0 `busbar-plugin-pack` is
-    // a feature-gated bin of the `busbar-plugin-sdk` package (`--features pack`), not a package of
-    // its own, and building it separately keeps the `pack` feature out of the `busbar` build.
+    // Two invocations: in busbar 1.6.0 `busbar-plugin-pack` is a feature-gated bin of the
+    // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
+    // separately keeps the `pack` feature out of the `busbar` build.
     for args in [
         &["build", "--release", "-p", "busbar", "--bin", "busbar"][..],
         &[
             "build",
             "--release",
             "-p",
-            "busbar-plugin-sdk",
+            "busbar-plugin-loader",
             "--features",
             "pack",
             "--bin",
