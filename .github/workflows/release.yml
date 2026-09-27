@@ -1,272 +1,57 @@
-# Release: on a version tag (e.g. v1.0.0), build the auth-ldap plugin cdylib for all 5
-# supported targets, pack + sign each into a loadable busbar plugin tarball, and publish them to
-# THIS repo's own GitHub Release.
-#
-# This mirrors busbar/.github/workflows/release.yml's `auth-plugins` job — same 5-target
-# matrix, same busbar-plugin-pack pack/sign step, same BUSBAR_SIGN_KEY-or-`--allow-unsigned`
-# fallback, same `gh release upload` + build-provenance attestation — just scoped to this one plugin.
-#
-# CONTRACT-ONLY BUILD (busbar 1.6.0). The cdylib's one busbar dependency is busbar-contract, a `git`
-# dependency on GetBusbar/busbar at the rev in `.busbar-ref` field 1 (ci.yml's `pin` job refuses a
-# manifest that disagrees). The plugin builds standalone with `--locked`; the busbar checkout at that
-# same rev exists ONLY to build the packer (busbar-plugin-pack, from busbar-plugin-loader) — nothing
-# in this repo's build reaches into it by path.
-#
-# This plugin's own version (the `v*` tag pushed here) is NOT tied to busbar's version number —
-# it is independently versioned (see README), separate from whichever busbar branch it happens to
-# build against via the .busbar-ref file at repo root.
-#
-# The packed manifest's abi_version is the auth PAYLOAD schema version (kind: auth => 2, the 1.5.2
-# auth ABI). It is not set here: busbar-plugin-pack derives it from `--kind auth` against the
-# busbar-contract this plugin builds against.
+# RENDERED by `cargo xtask fleet render busbar-auth-ldap` from GetBusbar/busbar's plugins.yaml and
+# .github/fleet/ templates; `cargo xtask fleet check` is red on any edit here. On a v* tag: this
+# repo's CI on the tagged commit, then busbar's plugin-release.yml (build, sign, pack, publish), then
+# the consumer verification of what was published, each at the busbar commit this repo pins.
 name: release
 
 on:
   push:
-    tags:
-      - "v*"
-      - "!v*-*" # never publish on a -rc prerelease tag (qa staging marker)
+    tags: ["v*", "!v*-*"]
+  # A tag pushed with GITHUB_TOKEN starts no workflow, so a workflow that tags dispatches this on
+  # the tag ref (`gh workflow run release.yml --ref <tag>`).
+  workflow_dispatch: {}
 
 permissions:
-  contents: write      # create the Release + upload assets
-  id-token: write      # OIDC identity for keyless Sigstore signing (provenance)
-  attestations: write  # record the build-provenance attestation
+  contents: write
+  id-token: write
+  attestations: write
+  issues: write
+  actions: read
 
 jobs:
-  # ── TEST GATE ────────────────────────────────────────────────────────────────────────────────
-  # Nothing is built, signed or attested until this repo's own suite passes AGAINST THE EXACT CORE
-  # COMMIT THIS RELEASE WILL BUILD AGAINST.
-  #
-  # This was missing, and the gap was not theoretical: `ci.yml` is armed on branch pushes and PRs
-  # only, so a `v*` tag event did not trigger it AT ALL, while `release-on-upstream.yml`'s cron cuts
-  # those tags automatically. A signed, provenance-attested plugin could therefore ship from a
-  # commit whose suite never ran in that run -- the attestation would faithfully certify the
-  # provenance of an untested artifact.
-  #
-  # `busbar_ref` is resolved from `.busbar-ref`, NOT from the branch: the release builds against a
-  # pinned core SHA, so the gate has to test against that same SHA or it is not testing what ships.
-  # Testing against a moving branch instead is the other half of the same defect.
-  resolve-busbar-ref:
-    runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.ref.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Resolve busbar ref from .busbar-ref
-        id: ref
-        run: echo "sha=$(cut -d' ' -f1 .busbar-ref)" >> "$GITHUB_OUTPUT"
-        shell: bash
-
-  # This repo's OWN ci.yml, on the tagged commit: its `pin` job proves every manifest's busbar rev
-  # IS `.busbar-ref` field 1, then fmt/clippy/build/test, the live e2e and the linked + dropped-in
-  # conformance run against that rev. (busbar's shared plugin-ci.yml assumed a sibling path checkout
-  # of the retired plugin-sdk and cannot build a contract-only plugin.)
-  gate:
-    needs: resolve-busbar-ref
-    uses: ./.github/workflows/ci.yml
+  ci:
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@7a5b429041752e00375e120ab1547a8928c3dee4
+    with:
+      service: openldap
+      busbar_checkout: true
+      macos_test: "cargo test --workspace --locked --lib --test conformance"
+      extra_test: ""
     secrets: inherit
-
-  # Create the Release first so the parallel per-target upload jobs have something to attach to
-  # (uploading from a matrix without a pre-existing release races -> "release not found").
-  create-release:
-    needs: gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +e
-          create_out=$(gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "busbar-auth-ldap ${GITHUB_REF_NAME}" \
-            --verify-tag --generate-notes 2>&1)
-          status=$?
-          set -e
-          echo "$create_out"
-          if [ "$status" -eq 0 ]; then
-            exit 0
-          fi
-          # Only swallow the specific "a release already exists for this tag" race (two runs of this
-          # job triggered for the same tag) — any other failure (auth error, --verify-tag rejection,
-          # --generate-notes error, etc.) must fail the job, not be silently papered over by falling
-          # through to `gh release view`.
-          if echo "$create_out" | grep -qi "already exists"; then
-            echo "Release ${GITHUB_REF_NAME} already exists — reusing it (parallel/retried run)."
-            gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}"
-          else
-            exit "$status"
-          fi
-
-  # One signed .tar.gz per target: {cdylib + manifest.json}, packed by busbar-plugin-pack and
-  # signed with the busbar release PRIVATE key (BUSBAR_SIGN_KEY secret) so it verifies as
-  # first-party against the PUBLIC key embedded in busbar's own release binaries. If that secret
-  # isn't provisioned on this repo, falls back to an UNSIGNED tarball (loadable only under
-  # plugins.trust.allow_unsigned) rather than blocking the release — same seam busbar's own
-  # release.yml documents (TODO(release-keys)).
-  auth-plugin:
-    needs: create-release
-    name: auth-plugin (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            libext: so
-            libprefix: lib
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            libext: so
-            libprefix: lib
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            libext: dylib
-            libprefix: lib
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            libext: dylib
-            libprefix: lib
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            libext: dll
-            libprefix: ""
-    steps:
-      - name: Checkout auth-ldap
-        uses: actions/checkout@v7
-        with:
-          path: auth-ldap
-
-      - name: Resolve busbar ref from .busbar-ref
-        id: ref
-        run: echo "sha=$(cut -d' ' -f1 auth-ldap/.busbar-ref)" >> "$GITHUB_OUTPUT"
-        shell: bash
-
-      # Source of the packer only; the plugin itself resolves busbar-contract from git at this rev.
-      - name: Checkout busbar at the pin (builds busbar-plugin-pack)
-        uses: actions/checkout@v7
-        with:
-          repository: GetBusbar/busbar
-          ref: ${{ steps.ref.outputs.sha }}
-          path: busbar
-
-      # The toolchain rust-toolchain.toml pins (both repos name 1.98.0). A floating `@stable` would
-      # install the target on a toolchain rustup then ignores in favour of the pinned one.
-      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            auth-ldap
-            busbar
-
-      - name: Build the auth-ldap plugin cdylib (busbar-contract from git at .busbar-ref)
-        working-directory: auth-ldap
-        run: cargo build --release --locked --target ${{ matrix.target }} -p busbar-auth-ldap-plugin
-        shell: bash
-
-      # Host build: the packer only reads the cdylib's bytes, so it need not match the plugin target.
-      # busbar-plugin-pack is a [[bin]] of busbar-plugin-loader (behind its `pack` feature).
-      - name: Build busbar-plugin-pack (from the pinned busbar checkout)
-        working-directory: busbar
-        run: cargo build --release --locked -p busbar-plugin-loader --features pack --bin busbar-plugin-pack
-        shell: bash
-
-      - name: Package + sign the plugin tarball
-        env:
-          BUSBAR_SIGN_KEY: ${{ secrets.BUSBAR_SIGN_KEY }}
-        run: |
-          set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
-          target="${{ matrix.target }}"
-          outdir="plugin-dist"; mkdir -p "$outdir"
-          pack="busbar/target/release/busbar-plugin-pack"
-          [ -x "$pack" ] || pack="busbar/target/release/busbar-plugin-pack.exe"
-          unsigned_flag=""
-          if [ -z "${BUSBAR_SIGN_KEY:-}" ]; then
-            echo "::warning::BUSBAR_SIGN_KEY secret is not provisioned — packaging an UNSIGNED plugin tarball (loadable only under plugins.trust.allow_unsigned). See busbar's release.yml TODO(release-keys) seam."
-            unsigned_flag="--allow-unsigned"
-          fi
-          lib="auth-ldap/target/${target}/release/${{ matrix.libprefix }}busbar_auth_ldap_plugin.${{ matrix.libext }}"
-          "$pack" pack \
-            --lib "$lib" \
-            --name "busbar-auth-ldap-plugin" --alias "ldap" --kind auth \
-            --version "$ver" --publisher busbar \
-            --description "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder, define it once under identity-providers.<name> (module: ldap, settings: url, bind_dn_template, base_dn, group_attr) and reference that name from auth.chain." \
-            --license Apache-2.0 \
-            --out "${outdir}/busbar-auth-ldap-plugin-${ver}-${target}.tar.gz" \
-            $unsigned_flag
-          ls -l "$outdir"
-        shell: bash
-
-      - name: Attach plugin tarball to Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" plugin-dist/*.tar.gz --repo "${GITHUB_REPOSITORY}" --clobber
-        shell: bash
-
-      # Keyless (Sigstore/OIDC) build-provenance attestation binding this tarball's digest to this
-      # workflow run + commit — `gh attestation verify <tarball> --repo ${{ github.repository }}`.
-      - name: Attest plugin build provenance
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: "plugin-dist/*.tar.gz"
-
-  # PHANTOM-RELEASE GUARD: assert the published Release actually carries assets before we treat this
-  # as a real release. The per-target build/upload jobs run with fail-fast:false, and `create-release`
-  # always makes the (initially empty) Release up front — so a build/pack failure on EVERY target
-  # (e.g. a stale Cargo.lock tripping `--locked`) leaves a tag + Release with ZERO assets: a "phantom"
-  # that silently breaks busbar's plugin-registry-gate. This job fails the whole release run loud if
-  # assets == 0, so a phantom can never ship (or notify downstream) unnoticed. It depends on the build
-  # matrix but does NOT inherit its fail-fast:false — one green target is enough to have assets, but
-  # zero across the board must hard-fail here.
-  verify-assets:
-    needs: [auth-plugin]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Assert the Release has at least one asset
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          count="$(gh release view "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json assets --jq '.assets | length')"
-          echo "Release ${GITHUB_REF_NAME} has ${count} asset(s)."
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::PHANTOM RELEASE: ${GITHUB_REF_NAME} was published with 0 assets." \
-                 "Every build/pack target failed to upload a tarball. Failing the release run so this" \
-                 "tag is not mistaken for a real release by busbar's plugin-registry-gate. Fix the" \
-                 "build (check Cargo.lock freshness vs --locked and the plugin cdylib build step)," \
-                 "delete this tag+release, and re-cut." >&2
-            exit 1
-          fi
-
-  # Instant marketing-site rebuild the moment this plugin ships a real release -- marketing's
-  # deploy.yml listens for this exact repository_dispatch event type (plus its own daily-poll
-  # fallback, so a missed/failed dispatch here is never a permanent gap). Same RELEASE_DISPATCH_TOKEN
-  # pattern busbar core's own release.yml uses for its downstream fan-out -- see that file's
-  # notify-downstream job for the template this mirrors. Fails loud (not a silent no-op) if the
-  # secret isn't provisioned, so a missing secret can't masquerade as "nothing to notify."
-  notify-marketing:
-    needs: [auth-plugin, verify-assets]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Dispatch upstream-release to the marketing site
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_DISPATCH_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::RELEASE_DISPATCH_TOKEN is not provisioned on this repo -- cannot notify" \
-                 "marketing instantly. marketing's own daily poll will still pick this release up" \
-                 "within 24h (self-healing fallback intact)." >&2
-            exit 1
-          fi
-          gh api "repos/GetBusbar/marketing/dispatches" \
-            -f event_type=upstream-release \
-            -f "client_payload[repo]=${GITHUB_REPOSITORY}" \
-            -f "client_payload[tag]=${GITHUB_REF_NAME}"
+  release:
+    needs: ci
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@7a5b429041752e00375e120ab1547a8928c3dee4
+    with:
+      plugin_crate: busbar-auth-ldap-plugin
+      manifest_name: busbar-auth-ldap-plugin
+      plugin_alias: ldap
+      plugin_kind: auth
+      asset_prefix: busbar-auth-ldap-plugin
+      description: "The AD/LDAP auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder, define it once under identity-providers.<name> (module: ldap, settings: url, bind_dn_template, base_dn, group_attr) and reference that name from auth.chain."
+      lib_only: false
+      needs_prompt: ""
+      needs_user: ""
+      declares_file: "auth-ldap/declares.json"
+    secrets: inherit
+  consumer-verify:
+    needs: release
+    if: ${{ !cancelled() }}
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@7a5b429041752e00375e120ab1547a8928c3dee4
+    with:
+      version: ${{ github.ref_name }}
+      asset_prefix: busbar-auth-ldap-plugin
+      plugin_name: busbar-auth-ldap-plugin
+      plugin_alias: ldap
+      plugin_kind: auth
+      bundle_image: ""
+      bundle_env: ""
+    secrets: inherit

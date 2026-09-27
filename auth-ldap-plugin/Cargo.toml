@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # The one busbar crate (#40): busbar-contract, whose `abi::sdk` carries the export macro — pinned by
 # git rev to `.busbar-ref` field 1.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
 busbar-auth-ldap = { path = "../auth-ldap" }
 serde_json = "1"
 
@@ -26,7 +26,7 @@ serde_json = "1"
 # against a spawned real busbar binary + an OpenLDAP service container, and SEED that directory over
 # LDAP (ldap3, the same client the plugin uses — sync + tls-rustls, matching the plugin's own feature
 # set).
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }

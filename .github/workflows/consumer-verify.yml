@@ -1,0 +1,33 @@
+# RENDERED by `cargo xtask fleet render busbar-auth-ldap` from GetBusbar/busbar's plugins.yaml and
+# .github/fleet/ templates; `cargo xtask fleet check` is red on any edit here. Daily: does the newest
+# PUBLISHED release still work for a user (busbar's plugin-consumer-verify.yml)? A publish-time check
+# cannot see an artifact that rots afterwards; release.yml verifies each release as it publishes.
+name: consumer-verify
+
+on:
+  schedule:
+    - cron: "52 9 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to verify. Empty = the newest published release."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  consumer:
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@7a5b429041752e00375e120ab1547a8928c3dee4
+    with:
+      version: ${{ inputs.version || '' }}
+      asset_prefix: busbar-auth-ldap-plugin
+      plugin_name: busbar-auth-ldap-plugin
+      plugin_alias: ldap
+      plugin_kind: auth
+      bundle_image: ""
+      bundle_env: ""
+    secrets: inherit

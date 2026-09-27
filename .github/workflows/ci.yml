@@ -1,155 +1,24 @@
-# auth-ldap CI — build, test, and the AD/LDAP login module's linked + dropped-in conformance, against the
-# busbar rev this repo PINS.
-#
-# This repo builds standalone: its only busbar dependency (busbar-contract, and busbar-plugin-loader
-# dev-only for the conformance and e2e tests) is a `git` dependency on
-# https://github.com/GetBusbar/busbar at the rev in field 1 of `.busbar-ref`. No sibling checkout, no
-# path dependency — so what CI proves is exactly what a busbar build that pulls this repo at a pinned
-# rev links.
-#
-# The moving leg (this repo's `dev` against busbar's `predev`) is busbar's side of the contract: its
-# ci.yml `plugin-proofs` job builds this repo's `dev` with busbar-contract (and busbar-plugin-loader)
-# patched to busbar's own tree.
+# RENDERED by `cargo xtask fleet render busbar-auth-ldap` from GetBusbar/busbar's plugins.yaml and
+# .github/fleet/ templates; `cargo xtask fleet check` is red on any edit here. The CI itself is
+# busbar's plugin-ci.yml, taken at the busbar commit this repo pins (.busbar-ref).
 name: ci
 
 on:
   push:
-    branches: [main, dev, qa]
+    branches: [dev, qa, main]
   pull_request:
-    branches: [main, dev, qa]
+    branches: [dev, qa, main]
   workflow_dispatch: {}
-  # release.yml's `gate` runs THIS workflow on the tagged commit, so a release is gated by exactly the
-  # suite (pin check, fmt, clippy, build, test, conformance) every dev push runs — at the same pin.
-  workflow_call: {}
 
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
-
 jobs:
-  pin:
-    name: the busbar pin is one rev
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Every `rev = "..."` on the busbar git source in every manifest is field 1 of `.busbar-ref`.
-      # Two revs would link two copies of the contract; a rev that disagrees with `.busbar-ref` makes
-      # the pin a lie about what the release builds against.
-      - name: every busbar git dependency names the .busbar-ref rev
-        run: |
-          set -euo pipefail
-          pin=$(awk '{print $1; exit}' .busbar-ref)
-          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::.busbar-ref field 1 is not a full sha: '$pin'"; exit 1; }
-          found=$(grep -hoE 'git = "https://github.com/GetBusbar/busbar", rev = "[0-9a-f]+"' ./*/Cargo.toml | grep -oE '[0-9a-f]{40}' | sort -u)
-          [ -n "$found" ] || { echo "::error::no busbar git dependency found"; exit 1; }
-          if [ "$found" != "$pin" ]; then
-            echo "::error::busbar revs in manifests ($found) != .busbar-ref ($pin)"; exit 1
-          fi
-          if grep -nE 'path = "\.\./\.\./' ./*/Cargo.toml; then
-            echo "::error::a manifest names a sibling-checkout path dependency"; exit 1
-          fi
-          # #40: the one busbar crate a plugin's NORMAL dependencies name is busbar-contract.
-          if awk '/^\[dependencies\]/{d=1;next} /^\[/{d=0} d && /^busbar-/ && !/^busbar-contract / && !/path = "\.\.\/[^.]/' ./*/Cargo.toml | grep .; then
-            echo "::error::a normal dependency names a busbar crate other than busbar-contract (#40)"; exit 1
-          fi
-          echo "pinned busbar rev: $pin"
-
-  build-test:
-    name: fmt, clippy, build, test, conformance [ubuntu]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
-        with:
-          components: clippy, rustfmt
-      - name: fmt
-        run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: build (the rlib a busbar build links, and the cdylib a signed tarball carries)
-        run: cargo build --workspace --locked
-      - name: test (the module's own suite + linked/dropped-in conformance over the real loader)
-        run: cargo test --workspace --locked
-
-  # The dropped-in door on a second platform (a Mach-O cdylib through the same loader). No service
-  # containers on macOS runners, so this leg runs the unit suites and the conformance test.
-  macos:
-    name: build, unit + conformance [macos]
-    runs-on: macos-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
-      - name: build
-        run: cargo build --workspace --locked
-      - name: unit suites + linked/dropped-in conformance
-        run: cargo test --workspace --locked --lib --test conformance
-
-  # LIVE E2E — the plugin through a REAL busbar boot: tests/e2e.rs builds the real `busbar` and
-  # `busbar-plugin-pack` binaries from a busbar checkout at `.busbar-ref` (BUSBAR_CHECKOUT), packs
-  # this plugin's cdylib, and drives the real flow against it and the service container below.
-  e2e:
-    name: live e2e (real busbar at .busbar-ref)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    services:
-      # Ready-made OpenLDAP: the image creates dc=example,dc=org + cn=admin from these variables, and
-      # tests/e2e.rs seeds the test user/group over LDAP itself. Digest-pinned.
-      openldap:
-        image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
-        env:
-          LDAP_ORGANISATION: Example Org
-          LDAP_DOMAIN: example.org
-          LDAP_ADMIN_PASSWORD: adminpassword
-        ports:
-          - 389:389
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          path: plugin
-      - name: Resolve busbar ref from .busbar-ref
-        id: ref
-        run: echo "sha=$(awk '{print $1; exit}' plugin/.busbar-ref)" >> "$GITHUB_OUTPUT"
-      - name: Checkout busbar at .busbar-ref (the binaries the e2e boots)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: GetBusbar/busbar
-          ref: ${{ steps.ref.outputs.sha }}
-          path: busbar
-      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
-      - name: e2e
-        working-directory: plugin
-        env:
-          BUSBAR_CHECKOUT: ${{ github.workspace }}/busbar
-          BUSBAR_TEST_LDAP_URL: ldap://127.0.0.1:389
-        run: cargo test --workspace --locked --test e2e -- --nocapture
-
-  # COVERAGE — ADDITIVE and NON-GATING: an instrumented run of this workspace's own suite, uploaded
-  # to Codecov for the README badge. Nothing depends on it; a Codecov outage is a no-op
-  # (`fail_ci_if_error: false`).
-  coverage:
-    name: coverage (llvm-cov · codecov)
-    runs-on: ubuntu-latest
-    if: github.event_name != 'push' || contains(fromJSON('["refs/heads/main", "refs/heads/dev", "refs/heads/qa"]'), github.ref)
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
-        with:
-          components: llvm-tools-preview
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Collect coverage
-        run: cargo llvm-cov --workspace --locked --ignore-run-fail --lcov --output-path lcov.info
-      - name: Upload to Codecov (never fails the build)
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
-          slug: GetBusbar/busbar-auth-ldap
-          fail_ci_if_error: false
+  ci:
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@7a5b429041752e00375e120ab1547a8928c3dee4
+    with:
+      service: openldap
+      busbar_checkout: true
+      macos_test: "cargo test --workspace --locked --lib --test conformance"
+      extra_test: ""
+    secrets: inherit
