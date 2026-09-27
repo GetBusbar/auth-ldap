@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # auth-ldap
 
-[![Coverage](https://codecov.io/gh/GetBusbar/auth-ldap/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/auth-ldap)
+[![Coverage](https://codecov.io/gh/GetBusbar/busbar-auth-ldap/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-auth-ldap)
 
 The first-party, signed `kind: auth` plugin for
 [busbar](https://getbusbar.com) that authenticates a username and
