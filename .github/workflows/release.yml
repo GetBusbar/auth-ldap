@@ -32,10 +32,10 @@ jobs:
     uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@7a5b429041752e00375e120ab1547a8928c3dee4
     with:
       plugin_crate: busbar-auth-ldap-plugin
-      manifest_name: busbar-auth-ldap-plugin
+      manifest_name: busbar-auth-ldap
       plugin_alias: ldap
       plugin_kind: auth
-      asset_prefix: busbar-auth-ldap-plugin
+      asset_prefix: busbar-auth-ldap
       description: "The AD/LDAP auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder, define it once under identity-providers.<name> (module: ldap, settings: url, bind_dn_template, base_dn, group_attr) and reference that name from auth.chain."
       lib_only: false
       needs_prompt: ""
@@ -48,8 +48,8 @@ jobs:
     uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@7a5b429041752e00375e120ab1547a8928c3dee4
     with:
       version: ${{ github.ref_name }}
-      asset_prefix: busbar-auth-ldap-plugin
-      plugin_name: busbar-auth-ldap-plugin
+      asset_prefix: busbar-auth-ldap
+      plugin_name: busbar-auth-ldap
       plugin_alias: ldap
       plugin_kind: auth
       bundle_image: ""
