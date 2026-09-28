@@ -114,7 +114,7 @@ fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::
             "--lib",
             so.to_str().unwrap(),
             "--name",
-            "busbar-auth-ldap-plugin",
+            "busbar-auth-ldap",
             "--alias",
             "ldap",
             "--kind",
