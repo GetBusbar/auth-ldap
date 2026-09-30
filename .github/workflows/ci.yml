@@ -21,4 +21,7 @@ jobs:
       busbar_checkout: true
       macos_test: "cargo test --workspace --locked --lib --test conformance"
       extra_test: ""
+      plugin_crate: busbar-auth-ldap-plugin
+      plugin_kind: auth
+      plugin_alias: ldap
     secrets: inherit

@@ -1,24 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# The AD/LDAP auth module for busbar, as a same-repo Cargo workspace mirroring auth-oidc:
-#   - auth-ldap:        the real LDAP BIND + group-read logic (implements busbar_contract::auth::
-#                       AuthModule + LoginModule). Opens its OWN LDAP/LDAPS socket (like
-#                       hashicorp-vault opens its own HTTPS), NOT the core-executes-hop model oidc uses.
-#   - auth-ldap-plugin: the thin dlopen cdylib adapter (export_login_plugin!).
+# RENDERED by `cargo xtask fleet render busbar-auth-ldap` from GetBusbar/busbar's plugins.yaml and
+# .github/fleet/workspace-Cargo.toml; `cargo xtask fleet check` is red on any edit here.
 #
-# Its one busbar dependency is busbar-contract (#40: a plugin names the contract only; the plugin SDK
-# is `busbar_contract::abi::sdk` since the #84 merge), plus busbar-plugin-loader dev-only for the
-# conformance and e2e tests — both `git` dependencies on GetBusbar/busbar pinned to the rev in
-# `.busbar-ref` field 1. No sibling-checkout path dependency ships in any manifest.
-#
-# Requires auth ABI v2, the version carrying the credential login flow: login_kind()=Credential,
-# begin_login returns Prompt(LoginForm{username,password}), and complete_login reads the submitted map
-# (Redacted values), BINDs, and Identifies. `// ABI GAP:` markers in-source mark the two limitations
-# the ABI does not yet cover (a secret-ref seam for the service-account password, and blocking I/O in
-# a sync FFI call); both are described under Limitations in README.md.
+# One repo per plugin, every repo a twin: this workspace is exactly two crates, the logic
+# (`auth-ldap/`, the rlib a busbar build can link) and the thin cdylib that packages it as a
+# droppable `kind: auth` plugin (`auth-ldap-plugin/`, crate `busbar-auth-ldap-plugin`). Its busbar
+# dependencies are git dependencies on GetBusbar/busbar at the fleet pin (`.busbar-ref` field 1);
+# no sibling-checkout path dependency ships in any manifest.
 [workspace]
 resolver = "2"
 members = [
     "auth-ldap",
     "auth-ldap-plugin",
 ]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/GetBusbar/busbar-auth-ldap"
+
+[workspace.dependencies]
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }

@@ -10,8 +10,9 @@ The AD/LDAP auth module as a droppable busbar plugin: a cdylib exporting the aut
 [![ci](https://github.com/GetBusbar/busbar-auth-ldap/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-auth-ldap/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
 
+## What it is for
+
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# auth-ldap
 
 [![Coverage](https://codecov.io/gh/GetBusbar/busbar-auth-ldap/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-auth-ldap)
 
@@ -36,7 +37,7 @@ token-exchange HTTP hop, while LDAP is a direct credential flow where the
 plugin opens its own socket — the same in-process model
 `hashicorp-vault` uses for its HTTPS calls.
 
-## The login flow
+### The login flow
 
 1. A user types a username and password on busbar's hosted login page.
    `login_kind()` returns `Credential`, so the method chooser renders a
@@ -65,7 +66,7 @@ There is no `client_secret`: a credential method is not a confidential
 OAuth client, so `LdapConfig` has no such field and
 `deny_unknown_fields` rejects one if it is configured.
 
-## Design
+### Design
 
 This repo is a same-repo, 2-crate Cargo workspace, mirroring `auth-oidc`:
 `auth-ldap/` (the `busbar-auth-ldap` library — the real LDAP BIND,
@@ -147,7 +148,7 @@ password and every end-user password on the wire in the clear.
 trusted, isolated segment. It is a no-op for `ldaps://`, for STARTTLS,
 and for a loopback host.
 
-## Limitations
+### Limitations
 
 - **`ca_cert_pem` is not wired.** The field deserializes for forward
   compatibility, but the custom-CA TLS path is not implemented, so
@@ -199,7 +200,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Dependencies
+### Dependencies
 
 `busbar-auth-ldap` (`auth-ldap/`) is a same-repo crate; `auth-ldap-plugin`
 depends on it as a normal workspace path dependency (`../auth-ldap`).
@@ -215,7 +216,7 @@ or test; the live end-to-end test (`tests/e2e.rs`) builds the real `busbar`
 binary from a checkout named by `BUSBAR_CHECKOUT` (CI's `e2e` job provides
 one at `.busbar-ref`).
 
-## Pack and sign
+### Pack and sign
 
 Once built, the cdylib is packed and signed like any other busbar plugin
 — see
