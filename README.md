@@ -89,10 +89,11 @@ Two directory shapes are supported:
   expand to a DN: one with no `=` (an AD UPN such as
   `{username}@corp.example`) is refused at boot.
 - **Search-then-bind** — set `user_search_filter` (e.g.
-  `(sAMAccountName={username})`, or `(userPrincipalName={username})` for
-  AD UPN logins) and the plugin first binds as `bind_service_dn`, locates
-  the user entry, then re-binds as the DN it found. This is the mode for
-  Active Directory.
+  `(sAMAccountName={username})`, or
+  `(userPrincipalName={username}@corp.example)` for AD UPN logins, where
+  users type the bare name as they did with 1.5.5's UPN template) and the
+  plugin first binds as `bind_service_dn`, locates the user entry, then
+  re-binds as the DN it found. This is the mode for Active Directory.
 
 A crafted username cannot inject DN components or filter syntax: on the
 DN template path a username carrying a DN special character (`,` `=` `+`
@@ -112,7 +113,7 @@ identity-providers:
       url: "ldaps://ad.corp.example:636"
       bind_dn_template: "cn={username},cn=users,dc=corp,dc=example"
       base_dn: "dc=corp,dc=example"
-      user_search_filter: "(userPrincipalName={username})"
+      user_search_filter: "(userPrincipalName={username}@corp.example)"
       bind_service_dn: "cn=busbar-svc,cn=users,dc=corp,dc=example"
       bind_service_password: "<service account password>"
       role_from: cn
