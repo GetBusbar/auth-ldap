@@ -215,7 +215,25 @@ impl LdapModule {
                 cfg.bind_dn_template
             ));
         }
+        // A zero timeout expires every connect and operation at once, so every login would fail.
+        if cfg.timeout_secs == 0 {
+            return Err("ldap timeout_secs must be at least 1".to_string());
+        }
+        // A blank group attribute is requested and read back as nothing, so every login would
+        // silently bind no roles.
+        if cfg.group_attr.trim().is_empty() {
+            return Err("ldap group_attr must not be empty".to_string());
+        }
         if let Some(f) = &cfg.user_search_filter {
+            // search-then-bind looks the user up under base_dn; a blank base searches from the
+            // root DSE, which finds no user on a typical directory.
+            if cfg.base_dn.trim().is_empty() {
+                return Err(
+                    "ldap base_dn must not be empty when user_search_filter is set (it is the \
+                     search base for the user lookup)"
+                        .to_string(),
+                );
+            }
             if !f.contains("{username}") {
                 return Err(
                     "ldap user_search_filter must contain the `{username}` placeholder".to_string(),

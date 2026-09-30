@@ -81,6 +81,38 @@ fn new_refuses_a_direct_bind_template_that_is_not_a_dn() {
     );
 }
 
+/// `timeout_secs: 0` expires every connect and operation at once; `new()` refuses it at boot.
+#[test]
+fn new_refuses_a_zero_timeout() {
+    let mut cfg = base_cfg();
+    cfg.timeout_secs = 0;
+    assert!(LdapModule::new(cfg).is_err());
+}
+
+/// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
+#[test]
+fn new_refuses_an_empty_group_attr() {
+    for attr in ["", "  "] {
+        let mut cfg = base_cfg();
+        cfg.group_attr = attr.to_string();
+        assert!(LdapModule::new(cfg).is_err(), "group_attr {attr:?}");
+    }
+}
+
+/// search-then-bind looks the user up under `base_dn`; a blank one is refused at boot. Direct bind
+/// does not search under `base_dn`, so a blank one stays accepted there.
+#[test]
+fn new_refuses_an_empty_base_dn_for_search_then_bind() {
+    for base in ["", " "] {
+        let mut cfg = search_cfg();
+        cfg.base_dn = base.to_string();
+        assert!(LdapModule::new(cfg).is_err(), "base_dn {base:?}");
+    }
+    let mut cfg = base_cfg();
+    cfg.base_dn = String::new();
+    assert!(LdapModule::new(cfg).is_ok());
+}
+
 #[test]
 fn search_then_bind_requires_service_dn() {
     let mut cfg = base_cfg();
