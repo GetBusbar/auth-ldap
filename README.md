@@ -192,12 +192,9 @@ and for a loopback host.
   LDAP compares case-insensitively while the map does not, and the OU
   path is deployment-specific. `role_from` picks the shape;
   `cn` is the default for that reason.
-- **Group collection is capped** at 4096 values per user entry: the
-  plugin keeps at most that many group values and logs when it truncates.
-  The cap bounds what is retained, not what is received: the LDAP client
-  reads each search response whole before the cap (and the search-then-
-  bind ambiguity check) apply, so a hostile directory can still make one
-  login buffer a large response.
+- **Group collection is capped** at 4096 values per user entry, so a
+  hostile or misconfigured directory cannot drive unbounded memory use.
+  The plugin logs when it truncates.
 
 ## Build
 

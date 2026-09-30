@@ -43,9 +43,8 @@ pub mod groups;
 #[cfg(test)]
 mod tests;
 
-/// The maximum number of `memberOf` group values kept from a user entry. A hostile or misconfigured
-/// directory could list an unbounded number of groups; the values retained are capped here. The cap
-/// bounds what is kept, not what is received: `ldap3` has already read the whole response by then.
+/// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
+/// directory could list an unbounded number of groups; collection is capped here to bound memory.
 /// 4096 is far above any real-world group membership; the module logs when it truncates.
 const MAX_GROUP_VALUES: usize = 4096;
 
