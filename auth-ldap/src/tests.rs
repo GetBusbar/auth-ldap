@@ -121,6 +121,15 @@ fn search_then_bind_requires_service_dn() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
+/// A `user_search_filter` without the `{username}` placeholder would look up the same entry for
+/// every login; `new()` refuses it.
+#[test]
+fn new_requires_search_filter_placeholder() {
+    let mut cfg = search_cfg();
+    cfg.user_search_filter = Some("(objectClass=person)".to_string());
+    assert!(LdapModule::new(cfg).is_err());
+}
+
 /// With a search filter set, a service DN but NO password would make `simple_bind(dn,
 /// "")` an UNAUTHENTICATED bind. `new()` must require the password too.
 #[test]
@@ -338,13 +347,37 @@ fn first_cn_unescapes_hex_pairs() {
     );
 }
 
-/// The operation timeout is derived from `timeout_secs`. (The full per-op wiring needs a
-/// live/hung directory to exercise end-to-end; this guards the value the module hands to `ldap3`.)
+/// The operation timeout is derived from `timeout_secs`.
 #[test]
 fn timeout_duration_derives_from_secs() {
     let mut cfg = base_cfg();
     cfg.timeout_secs = 7;
     assert_eq!(cfg.timeout(), std::time::Duration::from_secs(7));
+}
+
+/// The per-operation timeout is actually APPLIED to the real `ldap3` connection: against a directory
+/// that accepts the TCP connection and never answers, the bind gives up after `timeout_secs` and the
+/// login is rejected. Without the per-operation timeout the bind would wait forever.
+#[test]
+fn a_directory_that_never_answers_is_rejected_after_the_timeout() {
+    // Accepted by the kernel's backlog, never read from or answered.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+    let port = listener.local_addr().unwrap().port();
+    let mut cfg = base_cfg();
+    cfg.url = format!("ldap://127.0.0.1:{port}");
+    cfg.timeout_secs = 1;
+    let m = LdapModule::new(cfg).unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = m.complete_login(&with_submitted(&[("username", "alice"), ("password", "pw")]));
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the bind must give up after timeout_secs, not wait on the silent directory");
+    assert_eq!(out, LoginOutcome::Reject);
+    drop(listener);
 }
 
 #[test]
@@ -526,6 +559,9 @@ struct FakeLdap {
     /// cannot tell that apart from a correct bind. See
     /// `search_then_bind_authenticates_with_the_submitted_password`.
     bind_pairs: Vec<(String, String)>,
+    /// Every search issued, in order, as `(base, scope, attrs)` with scope `"base"` or `"subtree"`,
+    /// so a test can assert WHICH entry the group read targets and WHICH attribute it asks for.
+    searches: Vec<(String, &'static str, Vec<String>)>,
     /// Set once `unbind` is called.
     unbound: bool,
     /// Inject a TRANSPORT failure (`Err`) from `simple_bind` when the bind DN equals this — models a
@@ -555,11 +591,20 @@ impl LdapBackend for FakeLdap {
 
     fn search(
         &mut self,
-        _base: &str,
+        base: &str,
         scope: SearchScope,
         filter: &str,
-        _attrs: &[&str],
+        attrs: &[&str],
     ) -> Result<Vec<DirEntry>, String> {
+        let label = match scope {
+            SearchScope::Base => "base",
+            SearchScope::Subtree => "subtree",
+        };
+        self.searches.push((
+            base.to_string(),
+            label,
+            attrs.iter().map(|a| a.to_string()).collect(),
+        ));
         match scope {
             // search-then-bind user lookup
             SearchScope::Subtree => {
@@ -653,6 +698,47 @@ fn successful_bind_identifies_with_roles_and_normalized_id() {
     assert_eq!(p.id, "ldap:cn=alice,ou=people,dc=corp,dc=example");
     assert_eq!(p.roles, vec!["engineers".to_string(), "sre".to_string()]);
     assert!(fake.unbound, "connection should be unbound on success");
+    // The user lookup runs under base_dn; the group read is a Base read of the resolved user DN
+    // (not base_dn), asking for exactly the configured group attribute.
+    assert_eq!(
+        fake.searches,
+        vec![
+            (
+                "dc=corp,dc=example".to_string(),
+                "subtree",
+                vec!["dn".to_string()],
+            ),
+            (
+                "CN=Alice,OU=People,DC=corp,DC=example".to_string(),
+                "base",
+                vec!["memberOf".to_string()],
+            ),
+        ]
+    );
+}
+
+/// The group attribute is the CONFIGURED one, both in the request and when reading the entry back:
+/// with `group_attr: seeAlso` the values the directory returns under `seeAlso` become the roles.
+#[test]
+fn a_configured_group_attr_is_requested_and_read() {
+    let mut cfg = base_cfg();
+    cfg.group_attr = "seeAlso".to_string();
+    let m = LdapModule::new(cfg).unwrap();
+    let mut fake = FakeLdap {
+        group_values: vec!["cn=admins,ou=groups,dc=corp,dc=example".to_string()],
+        group_attr: "seeAlso".to_string(),
+        ..Default::default()
+    };
+    let p = m.bind_and_identify_on(&mut fake, "alice", "pw").unwrap();
+    assert_eq!(p.roles, vec!["admins".to_string()]);
+    assert_eq!(
+        fake.searches,
+        vec![(
+            "uid=alice,ou=people,dc=corp,dc=example".to_string(),
+            "base",
+            vec!["seeAlso".to_string()],
+        )]
+    );
 }
 
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
