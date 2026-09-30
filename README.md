@@ -134,7 +134,7 @@ auth:
 |---|---|---|---|
 | `url` | yes | — | `ldaps://host:636` (implicit TLS), or `ldap://host:389` for plaintext/STARTTLS. |
 | `bind_dn_template` | yes | — | Turns a username into the bind DN. Must contain `{username}`; validated at boot. In direct-bind mode it must expand to a DN (contain `=`). |
-| `base_dn` | yes | — | Search base for the search-then-bind user lookup; must not be empty when `user_search_filter` is set. (The group read is a base read of the bound user's own entry.) |
+| `base_dn` | yes | — | Search base for the search-then-bind user lookup. May be empty for a directory that serves a search from base `""` (the AD Global Catalog, OpenLDAP with `olcDefaultSearchBase`). (The group read is a base read of the bound user's own entry.) |
 | `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. Must not be empty. |
 | `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
 | `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}`; requires `bind_service_dn`. |

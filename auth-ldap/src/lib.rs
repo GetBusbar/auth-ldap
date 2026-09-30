@@ -227,15 +227,6 @@ impl LdapModule {
             return Err("ldap group_attr must not be empty".to_string());
         }
         if let Some(f) = &cfg.user_search_filter {
-            // search-then-bind looks the user up under base_dn; a blank base searches from the
-            // root DSE, which finds no user on a typical directory.
-            if cfg.base_dn.trim().is_empty() {
-                return Err(
-                    "ldap base_dn must not be empty when user_search_filter is set (it is the \
-                     search base for the user lookup)"
-                        .to_string(),
-                );
-            }
             if !f.contains("{username}") {
                 return Err(
                     "ldap user_search_filter must contain the `{username}` placeholder".to_string(),

@@ -99,18 +99,17 @@ fn new_refuses_an_empty_group_attr() {
     }
 }
 
-/// search-then-bind looks the user up under `base_dn`; a blank one is refused at boot. Direct bind
-/// does not search under `base_dn`, so a blank one stays accepted there.
+/// An empty `base_dn` is a working search base on some directories (the AD Global Catalog on
+/// 3268/3269 and OpenLDAP with `olcDefaultSearchBase` serve a subtree search from base ""), so
+/// `new()` accepts it in both modes, as 1.5.5 did.
 #[test]
-fn new_refuses_an_empty_base_dn_for_search_then_bind() {
-    for base in ["", " "] {
-        let mut cfg = search_cfg();
-        cfg.base_dn = base.to_string();
-        assert!(LdapModule::new(cfg).is_err(), "base_dn {base:?}");
-    }
+fn new_accepts_an_empty_base_dn() {
+    let mut cfg = search_cfg();
+    cfg.base_dn = String::new();
+    assert!(LdapModule::new(cfg).is_ok(), "search-then-bind");
     let mut cfg = base_cfg();
     cfg.base_dn = String::new();
-    assert!(LdapModule::new(cfg).is_ok());
+    assert!(LdapModule::new(cfg).is_ok(), "direct bind");
 }
 
 #[test]
