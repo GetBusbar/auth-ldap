@@ -454,6 +454,9 @@ impl LoginModule for LdapModule {
     }
 }
 
+/// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
+const LDAP_INVALID_CREDENTIALS: u32 = 49;
+
 /// Why a bind attempt did not yield an identity.
 #[derive(Debug)]
 enum BindError {
@@ -659,13 +662,20 @@ impl LdapModule {
                 .map_err(|_| BindError::InvalidCredentials)?
         };
 
-        // The credential check: BIND as the user with the presented password. A non-zero result code
-        // (e.g. 49 invalidCredentials) is a credential rejection.
+        // The credential check: BIND as the user with the presented password. Result code 49
+        // (invalidCredentials) is a credential rejection. Any other non-zero code (e.g. 51 busy,
+        // 52 unavailable) is a directory-side failure: still a Reject, but logged by
+        // `complete_login` so an outage is not mistaken for a wrong password.
         let rc = ldap
             .simple_bind(&user_dn, password)
             .map_err(|e| BindError::Directory(format!("bind: {e}")))?;
-        if rc != 0 {
+        if rc == LDAP_INVALID_CREDENTIALS {
             return Err(BindError::InvalidCredentials);
+        }
+        if rc != 0 {
+            return Err(BindError::Directory(format!(
+                "user bind rejected (rc={rc})"
+            )));
         }
 
         // Read the group-membership attribute off the (now bound) user entry.

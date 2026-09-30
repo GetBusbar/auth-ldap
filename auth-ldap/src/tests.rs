@@ -559,8 +559,11 @@ fn config_rejects_client_secret() {
 /// logic — result-code handling, ambiguity, group cap, roles, principal id — is unit-testable.
 #[derive(Default)]
 struct FakeLdap {
-    /// A bind whose password equals this string returns rc 49 (invalidCredentials); all others 0.
+    /// A bind whose password equals this string returns `reject_rc` (49, invalidCredentials, when
+    /// unset); all others 0.
     reject_password: Option<String>,
+    /// The result code a `reject_password` bind returns; `None` means 49.
+    reject_rc: Option<u32>,
     /// Entries returned by the Subtree (search-then-bind user lookup) search.
     search_entries: Vec<DirEntry>,
     /// Group values returned on the Base (group read) search.
@@ -607,7 +610,7 @@ impl LdapBackend for FakeLdap {
             return Err(format!("transport failure binding {dn}"));
         }
         let rc = if self.reject_password.as_deref() == Some(password) {
-            49
+            self.reject_rc.unwrap_or(49)
         } else {
             0
         };
@@ -684,6 +687,28 @@ fn bind_wrong_password_is_invalid_credentials() {
     };
     let r = m.bind_and_identify_on(&mut fake, "alice", "wrongpw");
     assert!(matches!(r, Err(BindError::InvalidCredentials)));
+}
+
+/// A user-bind result code other than 49 (e.g. 51 busy, 52 unavailable) is a directory failure, not
+/// a wrong password: it takes the logged `Directory` arm (still a Reject), and carries no credential.
+#[test]
+fn a_non_49_user_bind_rc_is_a_directory_failure() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    for rc in [51, 52] {
+        let mut fake = FakeLdap {
+            reject_password: Some("pw-secret".to_string()),
+            reject_rc: Some(rc),
+            group_attr: "memberOf".to_string(),
+            ..Default::default()
+        };
+        match m.bind_and_identify_on(&mut fake, "alice", "pw-secret") {
+            Err(BindError::Directory(e)) => {
+                assert!(e.contains(&format!("rc={rc}")), "got {e:?}");
+                assert!(!e.contains("pw-secret"), "the password leaked: {e:?}");
+            }
+            r => panic!("rc {rc} should be a Directory failure, got {r:?}"),
+        }
+    }
 }
 
 /// A search that matches nothing → `InvalidCredentials`, without ever
