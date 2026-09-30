@@ -263,9 +263,11 @@ missing or empty field.
 The live-bind happy path is integration-only: `auth-ldap-plugin/tests/e2e.rs`
 packs the real cdylib with the `busbar-plugin-pack` binary, drives a
 spawned busbar binary over real HTTP, and seeds a real OpenLDAP instance
-over LDAP with the same `ldap3` client the plugin uses. Point
-`BUSBAR_TEST_LDAP_URL` at that directory to run it; with the variable
-unset the test skips loudly rather than passing silently.
+over LDAP with the same `ldap3` client the plugin uses. A second live
+test drives the library module straight against that directory in both
+direct-bind and search-then-bind mode and checks the mapped role. Point
+`BUSBAR_TEST_LDAP_URL` at that directory to run them; with the variable
+unset they skip loudly, and under CI (`CI` set) they fail instead.
 
 ## License
 

@@ -14,8 +14,11 @@
 //! busbar/scripts/fixtures/auth-ldap/seed.ldif, kept in-test so the plugin's CI is self-contained.
 //!
 //! GATING: `BUSBAR_TEST_LDAP_URL` unset ⇒ SKIP loudly (local, no docker) — never a silent pass.
-//! Under CI the plugin-ci `service: openldap` arm sets it and the test RUNS.
+//! Under CI (`CI` set) the plugin-ci `service: openldap` arm sets it and the tests RUN; an unset URL
+//! under CI FAILS, so a broken service arm cannot turn the only real-directory gate vacuous.
 
+use busbar_contract::auth::{CompleteLogin, LoginModule as _, LoginOutcome};
+use busbar_contract::Redacted;
 use std::io::Write as _;
 
 const BASE_DN: &str = "dc=example,dc=org";
@@ -29,6 +32,25 @@ fn ldap_url() -> Option<String> {
         Ok(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
         _ => None,
     }
+}
+
+/// The live directory's URL, or `None` to skip (loudly) outside CI. Under CI an unset URL panics,
+/// like [`plugin_path`]'s unbuilt-cdylib guard: the service arm is supposed to provide it.
+fn live_ldap_url() -> Option<String> {
+    let url = ldap_url();
+    if url.is_none() {
+        if std::env::var_os("CI").is_some() {
+            panic!(
+                "BUSBAR_TEST_LDAP_URL is unset under CI: the plugin-ci `service: openldap` arm must \
+                 provide the OpenLDAP service container"
+            );
+        }
+        eprintln!(
+            "skip: BUSBAR_TEST_LDAP_URL unset — ldap live e2e needs the OpenLDAP service container \
+             (set by the plugin-ci `service: openldap` arm). Skipping (local, no docker)."
+        );
+    }
+    url
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
@@ -237,6 +259,68 @@ fn seed_directory(url: &str) {
     let _ = ldap.unbind();
 }
 
+/// Run one `complete_login` on the library module directly (no busbar boot).
+fn live_login(settings: serde_json::Value, username: &str, password: &str) -> LoginOutcome {
+    let cfg: busbar_auth_ldap::LdapConfig =
+        serde_json::from_value(settings).expect("live ldap settings parse");
+    let module = busbar_auth_ldap::LdapModule::new(cfg).expect("live ldap settings are valid");
+    let req = CompleteLogin {
+        submitted: [
+            ("username".to_string(), Redacted::new(username.to_string())),
+            ("password".to_string(), Redacted::new(password.to_string())),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    module.complete_login(&req)
+}
+
+/// The real `ldap3` backend against the live directory, in BOTH directory shapes: direct bind and
+/// search-then-bind (service bind, Subtree user lookup under base_dn, re-bind as the found DN). Each
+/// must Identify alice with the canonical principal id and exactly the role her `seeAlso` group maps
+/// to (`admins`), and must Reject a wrong password.
+#[test]
+fn ldap_module_binds_live_in_both_modes_and_maps_the_group() {
+    let Some(url) = live_ldap_url() else {
+        return;
+    };
+    seed_directory(&url);
+
+    let direct = serde_json::json!({
+        "url": url,
+        "bind_dn_template": "uid={username},ou=people,dc=example,dc=org",
+        "base_dn": BASE_DN,
+        "group_attr": "seeAlso",
+    });
+    let search = serde_json::json!({
+        "url": url,
+        "bind_dn_template": "uid={username},ou=people,dc=example,dc=org",
+        "base_dn": BASE_DN,
+        "group_attr": "seeAlso",
+        "user_search_filter": "(uid={username})",
+        "bind_service_dn": ADMIN_DN,
+        "bind_service_password": ADMIN_PW,
+    });
+    for (mode, settings) in [("direct bind", direct), ("search-then-bind", search)] {
+        let principal = match live_login(settings.clone(), "alice", ALICE_PW) {
+            LoginOutcome::Identify(p) => p,
+            other => panic!("{mode}: alice with her password must Identify, got {other:?}"),
+        };
+        assert_eq!(principal.id, format!("ldap:{ALICE_DN}"), "{mode}");
+        assert_eq!(
+            principal.roles,
+            vec!["admins".to_string()],
+            "{mode}: alice's seeAlso group must map to the role 'admins'"
+        );
+        assert_eq!(
+            live_login(settings, "alice", "wrong-password"),
+            LoginOutcome::Reject,
+            "{mode}: a wrong password must be rejected"
+        );
+    }
+}
+
 fn cookie_state(cookie_value: &str) -> String {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -291,11 +375,7 @@ fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut st
 /// it authenticates on the data plane. A WRONG password is REJECTED 401 — the real bind gates.
 #[test]
 fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
-    let Some(url) = ldap_url() else {
-        eprintln!(
-            "skip: BUSBAR_TEST_LDAP_URL unset — ldap live e2e needs the OpenLDAP service container \
-             (set by the plugin-ci `service: openldap` arm). Skipping (local, no docker)."
-        );
+    let Some(url) = live_ldap_url() else {
         return;
     };
     let Some(so_path) = plugin_path() else {
@@ -422,6 +502,10 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         page.contains("ldap:uid=alice"),
         "identity ldap:uid=alice must appear: {page}"
     );
+    // The key page names the per-user group only. It exists because role 'admins' bound to
+    // eng-team: with no bound role busbar answers 403 "No access yet" and the success check above
+    // fails. The role itself is asserted directly in
+    // `ldap_module_binds_live_in_both_modes_and_maps_the_group`.
     assert!(
         page.contains("user:ldap:uid=alice"),
         "group user:ldap:uid=alice must appear (role 'admins' must have bound)"
