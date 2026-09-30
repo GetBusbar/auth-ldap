@@ -745,6 +745,22 @@ fn a_configured_group_attr_is_requested_and_read() {
     );
 }
 
+/// The group attribute is matched case-insensitively (RFC 4512 §2.5): `group_attr: memberof` reads the
+/// values a server returns under `memberOf`, instead of silently yielding no roles.
+#[test]
+fn the_group_attr_is_matched_case_insensitively() {
+    let mut cfg = base_cfg();
+    cfg.group_attr = "memberof".to_string();
+    let m = LdapModule::new(cfg).unwrap();
+    let mut fake = FakeLdap {
+        group_values: vec!["cn=admins,ou=groups,dc=corp,dc=example".to_string()],
+        group_attr: "memberOf".to_string(),
+        ..Default::default()
+    };
+    let p = m.bind_and_identify_on(&mut fake, "alice", "pw").unwrap();
+    assert_eq!(p.roles, vec!["admins".to_string()]);
+}
+
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
 /// the first match.
 #[test]

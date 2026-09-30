@@ -680,7 +680,14 @@ impl LdapModule {
 
         let mut group_dns: Vec<String> = Vec::new();
         if let Some(entry) = entries.into_iter().next() {
-            if let Some(vals) = entry.attrs.get(&self.cfg.group_attr) {
+            // LDAP attribute descriptions are case-insensitive (RFC 4512 §2.5) and the entry is keyed
+            // by the server's spelling, so `group_attr: memberof` must find the server's `memberOf`.
+            let vals = entry
+                .attrs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&self.cfg.group_attr))
+                .map(|(_, v)| v);
+            if let Some(vals) = vals {
                 // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
                 // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
                 if vals.len() > MAX_GROUP_VALUES {
