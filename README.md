@@ -27,9 +27,9 @@ It is a `cdylib` that implements busbar's `AuthModule` and `LoginModule`
 traits (via
 [`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract))
 and is loaded in-process by busbar over the signed hybrid plugin ABI —
-`dlopen`'d, not spawned as a separate process. It requires **auth ABI
-v2** (`abi_version = 2`), the version that carries the credential login
-flow.
+`dlopen`'d, not spawned as a separate process. The credential login flow
+it uses is carried by the auth ABI from v2 on; this plugin is built at
+auth ABI 3 and declares `contract_abi` 3 (`auth-ldap/declares.json`).
 
 It is a **separate plugin from `busbar-auth-oidc`**, and takes a
 different shape: OIDC is a redirect flow where the core executes the
@@ -48,7 +48,7 @@ plugin opens its own socket — the same in-process model
    renders and POSTs back to `/auth/token`.
 3. `complete_login` reads those values back out of `CompleteLogin::
    submitted`, keyed by the field names the plugin declared. The values
-   ride `Redacted` (`Debug`/`Display` print `***`, zeroized on drop) and
+   ride `Redacted` (`Debug` prints `[REDACTED]`, zeroized on drop) and
    are exposed only at that one boundary, for the bind.
 4. The plugin opens its own LDAP/LDAPS socket and BINDs with the user's
    DN and password. That bind *is* the credential check — no token, no
@@ -94,9 +94,10 @@ Two directory shapes are supported:
   the user entry, then re-binds as the DN it found. This is the mode for
   Active Directory.
 
-The username is validated and RFC 4515-escaped before it reaches either
-a DN template or a search filter, so a crafted username cannot inject
-DN components or filter syntax.
+A crafted username cannot inject DN components or filter syntax: on the
+DN template path a username carrying a DN special character (`,` `=` `+`
+`<` `>` `;` `\` `"`, or a control character) is rejected, and on the
+search filter path the username is RFC 4515-escaped.
 
 ## Config
 
@@ -133,16 +134,16 @@ auth:
 |---|---|---|---|
 | `url` | yes | — | `ldaps://host:636` (implicit TLS), or `ldap://host:389` for plaintext/STARTTLS. |
 | `bind_dn_template` | yes | — | Turns a username into the bind DN. Must contain `{username}`; validated at boot. In direct-bind mode it must expand to a DN (contain `=`). |
-| `base_dn` | yes | — | Search base for the group read, and for the search-then-bind user lookup. |
-| `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. |
-| `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the leftmost RDN value, `dn` uses the full DN verbatim. |
+| `base_dn` | yes | — | Search base for the search-then-bind user lookup; must not be empty when `user_search_filter` is set. (The group read is a base read of the bound user's own entry.) |
+| `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. Must not be empty. |
+| `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
 | `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}`; requires `bind_service_dn`. |
 | `bind_service_dn` | no | — | Service-account DN used for the search-then-bind lookup. |
 | `bind_service_password` | no | — | Service-account password. Held in a redacting wrapper; see [Limitations](#limitations). |
 | `ca_cert_pem` | no | — | Reserved. A config that sets it is **rejected at boot** — see [Limitations](#limitations). |
 | `start_tls` | no | `false` | Use STARTTLS over an `ldap://` connection instead of implicit LDAPS. |
 | `allow_insecure_transport` | no | `false` | Override the plaintext-transport guard. See below. |
-| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. |
+| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. Must be at least 1. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
@@ -167,8 +168,9 @@ and for a loopback host.
   injects, so the plugin never sees it. There is no equivalent seam for
   a secret a plugin must present on a socket it opens itself, so
   `bind_service_password` is a raw string in the opaque settings map.
-  The plugin wraps it in a redacting newtype (`Debug`/`Display` print
-  `***`, plaintext reachable only through an explicit `expose()`), which
+  The plugin wraps it in a redacting newtype (`Debug` prints
+  `[REDACTED]`; there is no `Display`; plaintext reachable only through an
+  explicit `expose()`), which
   bounds the blast radius but does not remove the plaintext from config.
 - **Blocking I/O inside a synchronous FFI call.** `complete_login` is
   synchronous and the LDAP bind is blocking network I/O, invoked by the
@@ -189,9 +191,12 @@ and for a loopback host.
   LDAP compares case-insensitively while the map does not, and the OU
   path is deployment-specific. `role_from` picks the shape;
   `cn` is the default for that reason.
-- **Group collection is capped** at 4096 values per user entry, so a
-  hostile or misconfigured directory cannot drive unbounded memory use.
-  The plugin logs when it truncates.
+- **Group collection is capped** at 4096 values per user entry: the
+  plugin keeps at most that many group values and logs when it truncates.
+  The cap bounds what is retained, not what is received: the LDAP client
+  reads each search response whole before the cap (and the search-then-
+  bind ambiguity check) apply, so a hostile directory can still make one
+  login buffer a large response.
 
 ## Build
 

@@ -14,9 +14,10 @@
 //!    and returns [`busbar_contract::auth::LoginOutcome::Identify`] with a [`Principal`] whose `roles` are the
 //!    group names, mapped to policy downstream by the operator's `auth.role_bindings.ldap`.
 //!
-//! ## Auth ABI v2 — the LDAP credential method
+//! ## The LDAP credential method
 //!
-//! This module requires auth ABI v2, the version that carries the credential login flow:
+//! The credential login flow is carried by the auth ABI from v2 on; this plugin is built at auth
+//! ABI 3 (`AUTH_ABI_VERSION`) and declares `contract_abi` 3 in `declares.json`:
 //!
 //! - [`login_kind`](LdapModule::login_kind) declares [`LoginKind::Credential`] so the chooser renders
 //!   a form (not a redirect button) WITHOUT any side-effecting `begin_login` call.
@@ -42,8 +43,9 @@ pub mod groups;
 #[cfg(test)]
 mod tests;
 
-/// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
-/// directory could list an unbounded number of groups; collection is capped here to bound memory.
+/// The maximum number of `memberOf` group values kept from a user entry. A hostile or misconfigured
+/// directory could list an unbounded number of groups; the values retained are capped here. The cap
+/// bounds what is kept, not what is received: `ldap3` has already read the whole response by then.
 /// 4096 is far above any real-world group membership; the module logs when it truncates.
 const MAX_GROUP_VALUES: usize = 4096;
 
