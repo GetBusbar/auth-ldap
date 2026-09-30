@@ -27,8 +27,20 @@ fn open_rejects_missing_required_fields() {
 fn open_accepts_minimal_valid_config() {
     let cfg = r#"{
         "url": "ldaps://ad.corp.example:636",
-        "bind_dn_template": "{username}@corp.example",
+        "bind_dn_template": "uid={username},ou=people,dc=corp,dc=example",
         "base_dn": "dc=corp,dc=example"
     }"#;
     assert!(open(cfg).is_ok(), "minimal valid config should construct");
+}
+
+/// A direct-bind UPN template (`{username}@corp.example`) is not a DN, so the group read off the
+/// bound entry could never succeed; `open` refuses it at boot.
+#[test]
+fn open_rejects_a_direct_bind_upn_template() {
+    let cfg = r#"{
+        "url": "ldaps://ad.corp.example:636",
+        "bind_dn_template": "{username}@corp.example",
+        "base_dn": "dc=corp,dc=example"
+    }"#;
+    assert!(open(cfg).is_err());
 }

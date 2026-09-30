@@ -61,6 +61,26 @@ fn new_requires_username_placeholder() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
+/// Direct bind: the expanded template is the Base DN of the group read, so a template that can
+/// never expand to a DN (an AD UPN, no `=`) would bind every user and then fail every group read.
+/// `new()` refuses it at boot; search-then-bind (where the DN comes from the search) still accepts it.
+#[test]
+fn new_refuses_a_direct_bind_template_that_is_not_a_dn() {
+    let mut cfg = base_cfg();
+    cfg.bind_dn_template = "{username}@corp.example".to_string();
+    assert!(
+        LdapModule::new(cfg).is_err(),
+        "a direct-bind template with no `=` can never name the entry the groups are read from"
+    );
+
+    let mut cfg = search_cfg();
+    cfg.bind_dn_template = "{username}@corp.example".to_string();
+    assert!(
+        LdapModule::new(cfg).is_ok(),
+        "search-then-bind takes the DN from the search, so the template is not read as a DN"
+    );
+}
+
 #[test]
 fn search_then_bind_requires_service_dn() {
     let mut cfg = base_cfg();

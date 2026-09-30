@@ -21,7 +21,7 @@ use busbar_contract::auth::AuthPlugin;
 /// ```json
 /// {
 ///   "url": "ldaps://ad.corp.example:636",
-///   "bind_dn_template": "{username}@corp.example",
+///   "bind_dn_template": "uid={username},ou=people,dc=corp,dc=example",
 ///   "base_dn": "dc=corp,dc=example",
 ///   "group_attr": "memberOf",
 ///   "role_from": "cn",

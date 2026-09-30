@@ -84,12 +84,15 @@ rather than pulling in a second, OpenSSL-based stack.
 Two directory shapes are supported:
 
 - **Direct bind** — `bind_dn_template` turns the username into a DN
-  (`uid={username},ou=people,dc=corp,dc=example`, or an AD UPN bind
-  `{username}@corp.example`) and the plugin binds as that DN.
+  (`uid={username},ou=people,dc=corp,dc=example`) and the plugin binds as
+  that DN, then reads the groups off that same entry. The template must
+  expand to a DN: one with no `=` (an AD UPN such as
+  `{username}@corp.example`) is refused at boot.
 - **Search-then-bind** — set `user_search_filter` (e.g.
-  `(sAMAccountName={username})`) and the plugin first binds as
-  `bind_service_dn`, locates the user entry, then re-binds as the DN it
-  found.
+  `(sAMAccountName={username})`, or `(userPrincipalName={username})` for
+  AD UPN logins) and the plugin first binds as `bind_service_dn`, locates
+  the user entry, then re-binds as the DN it found. This is the mode for
+  Active Directory.
 
 The username is validated and RFC 4515-escaped before it reaches either
 a DN template or a search filter, so a crafted username cannot inject
@@ -106,8 +109,11 @@ identity-providers:
     module: ldap
     settings:
       url: "ldaps://ad.corp.example:636"
-      bind_dn_template: "{username}@corp.example"
+      bind_dn_template: "cn={username},cn=users,dc=corp,dc=example"
       base_dn: "dc=corp,dc=example"
+      user_search_filter: "(userPrincipalName={username})"
+      bind_service_dn: "cn=busbar-svc,cn=users,dc=corp,dc=example"
+      bind_service_password: "<service account password>"
       role_from: cn
 
 auth:
@@ -126,7 +132,7 @@ auth:
 | Setting | Required | Default | Notes |
 |---|---|---|---|
 | `url` | yes | — | `ldaps://host:636` (implicit TLS), or `ldap://host:389` for plaintext/STARTTLS. |
-| `bind_dn_template` | yes | — | Turns a username into the bind DN. Must contain `{username}`; validated at boot. |
+| `bind_dn_template` | yes | — | Turns a username into the bind DN. Must contain `{username}`; validated at boot. In direct-bind mode it must expand to a DN (contain `=`). |
 | `base_dn` | yes | — | Search base for the group read, and for the search-then-bind user lookup. |
 | `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. |
 | `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the leftmost RDN value, `dn` uses the full DN verbatim. |

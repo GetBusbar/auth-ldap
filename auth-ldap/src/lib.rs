@@ -201,6 +201,20 @@ impl LdapModule {
                 "ldap bind_dn_template must contain the `{username}` placeholder".to_string(),
             );
         }
+        // In direct-bind mode the expanded template is also the Base DN of the group read, so it
+        // must be a DN. A template with no `=` (an AD UPN such as `{username}@corp.example`) can
+        // never become one (`validate_username` refuses `=`), so every login would bind and then
+        // fail the group read. AD UPN logins go through search-then-bind instead.
+        if cfg.user_search_filter.is_none() && !cfg.bind_dn_template.contains('=') {
+            return Err(format!(
+                "ldap bind_dn_template {:?} is not a DN: in direct-bind mode the expanded template \
+                 is the entry the groups are read from, so it must be a DN such as \
+                 `uid={{username}},ou=people,dc=corp,dc=example`; for an AD UPN login set \
+                 user_search_filter (e.g. `(userPrincipalName={{username}}@corp.example)`) with \
+                 bind_service_dn and bind_service_password",
+                cfg.bind_dn_template
+            ));
+        }
         if let Some(f) = &cfg.user_search_filter {
             if !f.contains("{username}") {
                 return Err(
