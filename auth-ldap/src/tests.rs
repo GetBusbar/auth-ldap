@@ -356,7 +356,9 @@ fn timeout_duration_derives_from_secs() {
 
 /// The per-operation timeout is actually APPLIED to the real `ldap3` connection: against a directory
 /// that accepts the TCP connection and never answers, the bind gives up after `timeout_secs` and the
-/// login is rejected. Without the per-operation timeout the bind would wait forever.
+/// login is rejected. Without `with_timeout` before the bind (`RealLdap::simple_bind`) the bind would
+/// wait forever and this test fails. It does NOT cover the `with_timeout` before a search: the bind
+/// never completes here, so no search is reached.
 #[test]
 fn a_directory_that_never_answers_is_rejected_after_the_timeout() {
     // Accepted by the kernel's backlog, never read from or answered.
