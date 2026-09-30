@@ -298,6 +298,27 @@ fn bind_dn_rejects_injection_username() {
     }
 }
 
+/// RFC 4514 §2.4 must-escape positions: a leading or trailing space and a leading '#'. A lenient
+/// directory binds `alice` for `alice `, so accepting them would mint a second principal id for
+/// one directory entry.
+#[test]
+fn bind_dn_rejects_rfc4514_must_escape_positions() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    for bad in [" alice", "alice ", "#61", " "] {
+        assert!(
+            m.bind_dn_for(bad).is_err(),
+            "username {bad:?} should be rejected"
+        );
+    }
+    // Inside the value these are ordinary characters.
+    for ok in ["alice smith", "a#b"] {
+        assert!(
+            m.bind_dn_for(ok).is_ok(),
+            "username {ok:?} should be allowed"
+        );
+    }
+}
+
 #[test]
 fn username_validation_allows_normal_names() {
     for ok in ["alice", "alice.smith", "a_b-c", "user@corp.example"] {

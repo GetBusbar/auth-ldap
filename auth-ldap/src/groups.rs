@@ -156,6 +156,12 @@ pub fn validate_username(username: &str) -> Result<&str, String> {
     {
         return Err("username contains characters not allowed in a bind DN".to_string());
     }
+    // RFC 4514 §2.4 also requires escaping a leading or trailing space and a leading '#'. Lenient
+    // directories trim or reinterpret them and bind the plain entry, while the principal id keeps
+    // the raw spelling, so one entry would mint several principal ids. Reject them the same way.
+    if username.starts_with(' ') || username.ends_with(' ') || username.starts_with('#') {
+        return Err("username contains characters not allowed in a bind DN".to_string());
+    }
     Ok(username)
 }
 
