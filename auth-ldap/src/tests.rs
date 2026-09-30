@@ -370,7 +370,10 @@ fn a_directory_that_never_answers_is_rejected_after_the_timeout() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = m.complete_login(&with_submitted(&[("username", "alice"), ("password", "pw")]));
+        let out = m.complete_login(&with_submitted(&[
+            ("username", "alice"),
+            ("password", "pw"),
+        ]));
         let _ = tx.send(out);
     });
     let out = rx
