@@ -12,6 +12,7 @@
 //! build does) and names every banned crate and every banned feature it finds. The RED arm feeds it a
 //! closure that carries a plugin-side TLS stack and a socket crate, and proves it says so.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The crates no plugin's shipped closure may hold (`deps.toml` `[net-ban].crates`).
@@ -52,16 +53,17 @@ fn findings(tree: &str) -> Vec<String> {
     found
 }
 
-/// This crate's shipped closure, as `cargo tree` resolves it: normal and build edges, every target
-/// platform, the lockfile as committed.
-fn shipped_closure() -> String {
+/// `package`'s shipped closure under `dir`, as `cargo tree` resolves it: normal and build edges (no
+/// dev-dependencies, so features resolve as the shipped build does), every target platform. `extra`
+/// is `--locked` for the real crate and `--offline` for a fixture.
+fn tree_of(dir: &Path, package: &str, extra: &str) -> String {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(cargo)
         .args([
             "tree",
-            "--locked",
+            extra,
             "--package",
-            env!("CARGO_PKG_NAME"),
+            package,
             "--edges",
             "normal,build",
             "--target",
@@ -71,7 +73,7 @@ fn shipped_closure() -> String {
             "--format",
             "{p}|{f}",
         ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(dir)
         .output()
         .expect("cargo tree runs");
     assert!(
@@ -80,6 +82,15 @@ fn shipped_closure() -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("cargo tree prints UTF-8")
+}
+
+/// This crate's shipped closure, as `cargo tree` resolves it, the lockfile as committed.
+fn shipped_closure() -> String {
+    tree_of(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        env!("CARGO_PKG_NAME"),
+        "--locked",
+    )
 }
 
 #[test]
@@ -121,4 +132,82 @@ serde_json v1.0.133|default,std
 tokio v1.41.0|default,rt,time
 ";
     assert_eq!(findings(allowed), Vec::<String>::new());
+}
+
+/// A fixture: path crates named like the banned ones (no registry needed), and two one-member
+/// workspaces under a temp dir.
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Fixture {
+        let root = std::env::temp_dir().join(format!("net-ban-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let fx = Fixture(root);
+        fx.krate("libs/socket2", "socket2", "0.5.7", "");
+        fx.krate(
+            "libs/tokio",
+            "tokio",
+            "1.41.0",
+            "[features]\nnet = []\nrt = []\ndefault = [\"rt\"]\n",
+        );
+        // shipped with `socket2` as a dev-dependency only
+        fx.member(
+            "dev",
+            "[dependencies]\ntokio = { path = \"../../libs/tokio\" }\n\
+             [dev-dependencies]\nsocket2 = { path = \"../../libs/socket2\" }\n\
+             tokio = { path = \"../../libs/tokio\", features = [\"net\"] }\n",
+        );
+        // shipped with `socket2` as a normal dependency
+        fx.member(
+            "normal",
+            "[dependencies]\nsocket2 = { path = \"../../libs/socket2\" }\n",
+        );
+        fx
+    }
+
+    fn krate(&self, rel: &str, name: &str, version: &str, extra: &str) {
+        let dir = self.0.join(rel);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "\n").unwrap();
+        let toml = format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2021\"\n{extra}"
+        );
+        std::fs::write(dir.join("Cargo.toml"), toml).unwrap();
+    }
+
+    fn member(&self, name: &str, deps: &str) {
+        let ws = self.0.join(format!("ws-{name}"));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            format!("[workspace]\nresolver = \"2\"\nmembers = [\"{name}\"]\n"),
+        )
+        .unwrap();
+        let rel = format!("ws-{name}/{name}");
+        self.krate(&rel, name, "0.1.0", deps);
+    }
+
+    fn findings(&self, name: &str) -> Vec<String> {
+        findings(&tree_of(
+            &self.0.join(format!("ws-{name}")),
+            name,
+            "--offline",
+        ))
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// RED/GREEN over the real `cargo tree` invocation: `socket2` as a dev-dependency only is not
+/// reported (nor is a `tokio/net` that only a dev-dependency turns on); the same `socket2` as a
+/// normal dependency is.
+#[test]
+fn a_dev_dependency_is_not_the_shipped_closure_and_a_normal_one_is() {
+    let fx = Fixture::new();
+    assert_eq!(fx.findings("dev"), Vec::<String>::new());
+    assert_eq!(fx.findings("normal"), vec!["crate socket2".to_string()]);
 }
