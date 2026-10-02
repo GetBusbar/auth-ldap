@@ -34,8 +34,9 @@ same door. It declares `contract_abi` 3 (`auth-ldap/declares.json`).
 It is a **separate plugin from `busbar-auth-oidc`**, and takes a
 different shape: OIDC is a redirect flow where the core executes the
 token-exchange HTTP hop, while LDAP is a direct credential flow where the
-plugin opens its own socket — the same in-process model
-`hashicorp-vault` uses for its HTTPS calls.
+plugin speaks the directory's wire protocol itself, as a sans-IO codec
+over a byte stream the host connector owns. The plugin opens no socket
+and does no TLS.
 
 ### The login flow
 
@@ -49,9 +50,13 @@ plugin opens its own socket — the same in-process model
 3. `complete_login` reads those values back out of the submitted fields,
    keyed by the field names the plugin declared; the password rides a
    secret blob and is exposed only for the bind.
-4. The plugin opens its own LDAP/LDAPS socket and BINDs with the user's
-   DN and password. That bind *is* the credential check — no token, no
-   redirect.
+4. The plugin asks the host connector for a stream on its one declared
+   need (outbound, a raw `tcp` stream, egress class
+   `operator-infrastructure`), secured by the connector for `ldaps://` or
+   after the StartTLS extended operation for `start_tls`, and BINDs with
+   the user's DN and password over it. That bind *is* the credential
+   check — no token, no redirect. While the stream pends, `complete_login`
+   answers PENDING and resumes on the wake; nothing is sent twice.
 5. On a successful bind it reads the user's group memberships
    (`memberOf` by default) and answers the identity, subject
    `ldap:<the full lowercased bind DN>` and groups set from the mapped
@@ -76,12 +81,11 @@ group-read and role-mapping logic, and its door, `door::door`) and
 exports that door with `export_door!`). A custom build links the
 library crate and registers `door::door` as a compiled-in row.
 
-LDAP work is done with [`ldap3`](https://crates.io/crates/ldap3) in its
-`sync` + `tls-rustls` configuration: the door's `complete_login` binds
-with the blocking `LdapConn` (the Statement states the `blocks` mark, so
-the host never runs it inline on a worker), and rustls
-keeps the plugin on the same TLS backend as the rest of the ecosystem
-rather than pulling in a second, OpenSSL-based stack.
+LDAP work is done by the plugin's own sans-IO codec (`ber.rs`,
+`filter.rs`, `codec.rs`: the requests 1.5.5's `ldap3` client wrote, byte
+for byte, and the replies read fail-closed), driven over the host's stream
+by `conversation.rs`. No call blocks, so the Statement states no `blocks`
+mark, and the plugin carries no LDAP client, socket or TLS crate.
 
 Two directory shapes are supported:
 
@@ -166,20 +170,17 @@ and for a loopback host.
   ignoring it would silently fall back to the system trust roots while
   the operator believed a private CA was in use. Use a system-trusted
   certificate until this lands.
-- **The service-account password arrives as plaintext in the settings
-  blob.** OIDC's `client_secret` is a `SecretRef` the core resolves and
-  injects, so the plugin never sees it. There is no equivalent seam for
-  a secret a plugin must present on a socket it opens itself, so
-  `bind_service_password` is a raw string in the opaque settings map.
-  The plugin wraps it in a redacting newtype (`Debug` prints
-  `[REDACTED]`; there is no `Display`; plaintext reachable only through an
-  explicit `expose()`), which
-  bounds the blast radius but does not remove the plaintext from config.
-- **The plugin opens its own socket and blocks.** 1.6.0's design moves
-  every plugin connection onto the host's connector (a sans-IO LDAP
-  codec over a host stream); until then the bind is blocking I/O inside
-  `complete_login`, declared with the Statement's `blocks` mark so the
-  host runs it off its workers.
+- **The service-account password is a secret reference.** The Statement
+  names `bind_service_password` in its `secret_refs`, so the kernel
+  resolves it into `OpenIn.secrets`, which wins; a 1.5.5 literal in the
+  settings is still accepted. Either way the plugin holds it in a
+  redacting newtype (`Debug` prints `[REDACTED]`; there is no `Display`;
+  plaintext reachable only through an explicit `expose()`).
+- **Fail-closed differences from 1.5.5 (owner-signed, 2026-09-28).** A
+  malformed reply or a URL that names no host is an outage instead of a
+  panic; a nested BER length that overruns its parent fails at once
+  instead of waiting for bytes that never come; an inbound message past
+  16 MiB is refused from its header.
 - **A directory outage answers its own verdict** (`LOGIN_OUTAGE`,
   distinct from a bad credential), and the plugin logs the operational
   detail (never the credential) at `warn`.
@@ -259,8 +260,9 @@ lifecycle's refusal texts.
 The live-bind happy path is integration-only: `auth-ldap-plugin/tests/e2e.rs`
 packs the real cdylib with the `busbar-plugin-pack` binary, drives a
 spawned busbar binary over real HTTP, and seeds a real OpenLDAP instance
-over LDAP with the same `ldap3` client the plugin uses. A second live
-test drives the library module straight against that directory in both
+over plaintext LDAP with a dev-only `ldap3` client. A second live test
+drives the library module's codec (over the test's own stream) straight
+against that directory in both
 direct-bind and search-then-bind mode and checks the mapped role. Point
 `BUSBAR_TEST_LDAP_URL` at that directory to run them; with the variable
 unset they skip loudly, and under CI (`CI` set) they fail instead.

@@ -3,14 +3,14 @@
 
 //! Plugin-SIDE live end-to-end for the AD/LDAP login plugin — the mirror of `auth-oidc-plugin`'s
 //! `tests/e2e.rs`, testing THIS plugin's OWN token-exchange direction (the GET credential-FORM flow:
-//! chooser → form → POST creds → the plugin BINDs its own LDAP socket → key).
+//! chooser → form → POST creds → the plugin BINDs over the host connector's stream → key).
 //!
 //! LDAP is a `Credential` method: there is no held-token/redirect path, so the faithful test is a REAL
 //! busbar boot driving the real form POST, with the plugin binding against a READY-MADE OpenLDAP
 //! container (never a hand-rolled directory), provided by CI as a service container and addressed via
 //! `BUSBAR_TEST_LDAP_URL` (mirrors the store plugins' `BUSBAR_TEST_POSTGRES_URL`). The container
 //! auto-creates the base suffix + admin from its own env; this test seeds the test user/group over
-//! LDAP itself (`ldap3`, the same client the plugin uses) — the CI-service equivalent of feeding
+//! LDAP itself (`ldap3`, a dev-only client; the plugin speaks its own sans-IO codec) — the CI-service equivalent of feeding
 //! busbar/scripts/fixtures/auth-ldap/seed.ldif, kept in-test so the plugin's CI is self-contained.
 //!
 //! GATING: `BUSBAR_TEST_LDAP_URL` unset ⇒ SKIP loudly (local, no docker) — never a silent pass.
@@ -258,15 +258,50 @@ fn seed_directory(url: &str) {
     let _ = ldap.unbind();
 }
 
-/// Run one credential login on the library module directly (no busbar boot).
+/// THE TEST'S OWN STREAM to the live directory: a plaintext TCP socket in this test only (the
+/// shipped plugin opens none; its stream is the host connector's). Every call answers at once.
+struct TestStream(Option<std::net::TcpStream>);
+
+impl busbar_auth_ldap::conversation::Wire for TestStream {
+    fn establish(&mut self, target: &str) -> std::task::Poll<Result<(), String>> {
+        let s = std::net::TcpStream::connect(target).map_err(|e| e.to_string());
+        std::task::Poll::Ready(s.and_then(|s| {
+            s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .map_err(|e| e.to_string())?;
+            self.0 = Some(s);
+            Ok(())
+        }))
+    }
+    fn secure(&mut self) -> std::task::Poll<Result<(), String>> {
+        std::task::Poll::Ready(Err("the test stream is plaintext".into()))
+    }
+    fn write(&mut self, bytes: &[u8]) -> std::task::Poll<Result<usize, String>> {
+        use std::io::Write as _;
+        let s = self.0.as_mut().expect("established");
+        std::task::Poll::Ready(s.write(bytes).map_err(|e| e.to_string()))
+    }
+    fn read(&mut self, buf: &mut [u8]) -> std::task::Poll<Result<usize, String>> {
+        use std::io::Read as _;
+        let s = self.0.as_mut().expect("established");
+        std::task::Poll::Ready(s.read(buf).map_err(|e| e.to_string()))
+    }
+}
+
+/// Run one credential login on the library module directly (no busbar boot): the module's codec
+/// over the test's own stream.
 fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
     let cfg: busbar_auth_ldap::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
     let module = busbar_auth_ldap::LdapModule::new(cfg).expect("live ldap settings are valid");
-    module.login(Some(username), Some(password))
+    let mut conv = busbar_auth_ldap::conversation::Conversation::new();
+    let mut stream = TestStream(None);
+    match module.login_over(&mut conv, &mut stream, Some(username), Some(password), None) {
+        std::task::Poll::Ready(login) => login,
+        std::task::Poll::Pending => panic!("the test stream never pends"),
+    }
 }
 
-/// The real `ldap3` backend against the live directory, in BOTH directory shapes: direct bind and
+/// The module's codec against the live directory, in BOTH directory shapes: direct bind and
 /// search-then-bind (service bind, Subtree user lookup under base_dn, re-bind as the found DN). Each
 /// must Identify alice with the canonical principal id and exactly the role her `seeAlso` group maps
 /// to (`admins`), and must Reject a wrong password.
