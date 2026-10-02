@@ -13,13 +13,6 @@ license = "Apache-2.0"
 # what makes the conformance test's cdylib get built.
 crate-type = ["cdylib", "rlib"]
 
-[features]
-# THE DROPPED-IN DOOR: `export_door!` emits the image's one symbol. On by default, since this crate
-# exists to be the cdylib (busbar's plugin-release builds it with no feature flags); a build that
-# links this crate as a row turns it off, or links `busbar-auth-ldap` instead.
-default = ["dropped-in"]
-dropped-in = []
-
 [dependencies]
 # The one busbar crate (#40): busbar-contract, whose `abi::sdk` carries the export macro — pinned by
 # git rev to `.busbar-ref` field 1.

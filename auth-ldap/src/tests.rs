@@ -7,24 +7,10 @@
 
 use crate::groups::{escape_filter, first_cn, roles_from_group_dns, validate_username};
 use crate::{
-    principal_id, submitted_field, AuthModule, AuthVerdict, BeginLogin, BindError, CompleteLogin,
-    DirEntry, FieldKind, LdapBackend, LdapConfig, LdapModule, LoginForm, LoginKind, LoginModule,
-    LoginOutcome, RoleFrom, SearchScope,
+    principal_id, BindError, DirEntry, LdapBackend, LdapConfig, LdapModule, Login, RoleFrom,
+    SearchScope,
 };
-use busbar_contract::Redacted;
 use std::collections::HashMap;
-
-/// Build a `CompleteLogin` carrying the given credential fields in its `submitted` map (each value
-/// `Redacted`, exactly as the engine hands them across the credential boundary).
-fn with_submitted(pairs: &[(&str, &str)]) -> CompleteLogin {
-    CompleteLogin {
-        submitted: pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), Redacted::new(v.to_string())))
-            .collect(),
-        ..Default::default()
-    }
-}
 
 fn base_cfg() -> LdapConfig {
     serde_json::from_value(serde_json::json!({
@@ -392,16 +378,13 @@ fn a_directory_that_never_answers_is_rejected_after_the_timeout() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = m.complete_login(&with_submitted(&[
-            ("username", "alice"),
-            ("password", "pw"),
-        ]));
+        let out = m.login(Some("alice"), Some("pw"));
         let _ = tx.send(out);
     });
     let out = rx
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("the bind must give up after timeout_secs, not wait on the silent directory");
-    assert_eq!(out, LoginOutcome::Reject);
+    assert_eq!(out, Login::Outage);
     drop(listener);
 }
 
@@ -454,86 +437,16 @@ fn roles_empty_when_no_groups() {
     assert!(roles_from_group_dns(&[], RoleFrom::Cn).is_empty());
 }
 
-// ── Auth ABI v2 credential-flow behavior ────────────────────────────────────────────────────────
+// ── The credential flow ─────────────────────────────────────────────────────────────────────────
 
+/// `login` refuses absent credentials and an empty (anonymous-bind) password without ever
+/// reaching the socket. The happy path (real bind -> Identity) needs a live directory: tests/e2e.rs.
 #[test]
-fn authenticate_defers_ldap_is_login_only() {
+fn login_refuses_missing_or_empty_credentials() {
     let m = LdapModule::new(base_cfg()).unwrap();
-    // LDAP verifies no opaque bearer — it must Pass so the data-plane chain continues.
-    assert_eq!(m.authenticate(Some("some-token")), AuthVerdict::Pass);
-    assert_eq!(m.authenticate(None), AuthVerdict::Pass);
-    assert_eq!(m.name(), "ldap");
-    assert!(m.cacheable());
-}
-
-/// LDAP self-classifies as a `Credential` method so the chooser renders a form (no side-effecting
-/// `begin_login` call, no PKCE state minted).
-#[test]
-fn login_kind_is_credential() {
-    let m = LdapModule::new(base_cfg()).unwrap();
-    assert_eq!(m.login_kind(), LoginKind::Credential);
-}
-
-/// begin_login returns a `Prompt(LoginForm)` declaring exactly [username(Text,required),
-/// password(Password,required)] — no redirect URL, no PKCE use.
-#[test]
-fn begin_login_prompts_username_password_form() {
-    let m = LdapModule::new(base_cfg()).unwrap();
-    let req = BeginLogin {
-        redirect_uri: "https://busbar.example/auth/token".into(),
-        state: "s".into(),
-        code_challenge: "c".into(),
-        nonce: None,
-        scopes: vec![],
-    };
-    let LoginOutcome::Prompt(LoginForm { fields }) = m.begin_login(&req) else {
-        panic!("begin_login must Prompt a credential form");
-    };
-    assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].name, "username");
-    assert_eq!(fields[0].kind, FieldKind::Text);
-    assert!(fields[0].required);
-    assert_eq!(fields[1].name, "password");
-    assert_eq!(fields[1].kind, FieldKind::Password);
-    assert!(fields[1].required);
-}
-
-/// `submitted_field` reads a value back by the field `name` the plugin declared, and returns `None`
-/// for an absent field.
-#[test]
-fn submitted_field_reads_declared_names() {
-    let req = with_submitted(&[("username", "alice"), ("password", "hunter2")]);
-    assert_eq!(submitted_field(&req, "username"), Some("alice"));
-    assert_eq!(submitted_field(&req, "password"), Some("hunter2"));
-    assert_eq!(submitted_field(&req, "totp"), None);
-    // The values ride Redacted on the engine side — Debug must never reveal the password.
-    assert!(
-        !format!("{req:?}").contains("hunter2"),
-        "submitted values must be redacted in Debug"
-    );
-}
-
-/// complete_login rejects when credentials are absent, and rejects an empty (anonymous-bind)
-/// password — without ever reaching the socket. The happy path (real bind → Identify) needs a live
-/// directory and is covered by integration testing, not here.
-#[test]
-fn complete_login_rejects_missing_or_empty_credentials() {
-    let m = LdapModule::new(base_cfg()).unwrap();
-    // no submitted map at all
-    assert_eq!(
-        m.complete_login(&CompleteLogin::default()),
-        LoginOutcome::Reject
-    );
-    // username present but password missing from the map
-    assert_eq!(
-        m.complete_login(&with_submitted(&[("username", "alice")])),
-        LoginOutcome::Reject
-    );
-    // empty password → anonymous-bind guard (never reaches the socket)
-    assert_eq!(
-        m.complete_login(&with_submitted(&[("username", "alice"), ("password", "")])),
-        LoginOutcome::Reject
-    );
+    assert_eq!(m.login(None, None), Login::BadCredential);
+    assert_eq!(m.login(Some("alice"), None), Login::BadCredential);
+    assert_eq!(m.login(Some("alice"), Some("")), Login::BadCredential);
 }
 
 /// LDAP is a `Credential` method: it has no confidential-client `client_secret`. The config type has
@@ -875,7 +788,7 @@ fn group_values_are_capped() {
 
 // ── every Directory→Reject branch actually rejects ───────────────────────────────────────────────
 // The fake now injects transport errors, so each operational-failure branch is exercised and proven
-// to yield `Directory` (which `complete_login` maps to `Reject`) — never `Identify`.
+// to yield `Directory` (which `login` answers as `Outage`) — never `Identify`.
 
 /// A transport failure on the SERVICE bind is Directory→Reject.
 #[test]

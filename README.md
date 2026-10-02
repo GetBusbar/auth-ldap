@@ -23,13 +23,13 @@ credential check, a group read off the bound user, and a group-DN → role
 mapping that hands busbar a `Principal` it can bind to virtual keys and
 roles.
 
-It is a `cdylib` that implements busbar's `AuthModule` and `LoginModule`
-traits (via
-[`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract))
-and is loaded in-process by busbar over the signed hybrid plugin ABI —
-`dlopen`'d, not spawned as a separate process. The credential login flow
-it uses is carried by the auth ABI from v2 on; this plugin is built at
-auth ABI 3 and declares `contract_abi` 3 (`auth-ldap/declares.json`).
+It is a `cdylib` exporting one busbar 1.6.0 plugin door
+(`busbar_plugin_door`, a `plugin_door!` over the auth kind's table,
+`abi::auth` v3, from
+[`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)),
+loaded in-process by busbar — `dlopen`'d, not spawned as a separate
+process — or linked into a busbar build as a compiled-in row through the
+same door. It declares `contract_abi` 3 (`auth-ldap/declares.json`).
 
 It is a **separate plugin from `busbar-auth-oidc`**, and takes a
 different shape: OIDC is a redirect flow where the core executes the
@@ -40,27 +40,28 @@ plugin opens its own socket — the same in-process model
 ### The login flow
 
 1. A user types a username and password on busbar's hosted login page.
-   `login_kind()` returns `Credential`, so the method chooser renders a
-   form rather than a redirect button, without having to call
-   `begin_login` first.
-2. `begin_login` returns `LoginOutcome::Prompt(LoginForm)` declaring two
-   fields — `username` (text) and `password` (password) — which the core
-   renders and POSTs back to `/auth/token`.
-3. `complete_login` reads those values back out of `CompleteLogin::
-   submitted`, keyed by the field names the plugin declared. The values
-   ride `Redacted` (`Debug` prints `[REDACTED]`, zeroized on drop) and
-   are exposed only at that one boundary, for the bind.
+   The door's Statement declares a credential login kind, so the method
+   chooser renders a form rather than a redirect button, without having
+   to call `begin_login` first.
+2. `begin_login` answers the form, declaring two fields — `username`
+   (text) and `password` (password) — which the core renders and POSTs
+   back to `/auth/token`.
+3. `complete_login` reads those values back out of the submitted fields,
+   keyed by the field names the plugin declared; the password rides a
+   secret blob and is exposed only for the bind.
 4. The plugin opens its own LDAP/LDAPS socket and BINDs with the user's
    DN and password. That bind *is* the credential check — no token, no
    redirect.
 5. On a successful bind it reads the user's group memberships
-   (`memberOf` by default) and returns
-   `LoginOutcome::Identify(Principal)` with `id = "ldap:<the full lowercased bind DN>"` and
-   `roles` set from the mapped group names.
+   (`memberOf` by default) and answers the identity, subject
+   `ldap:<the full lowercased bind DN>` and groups set from the mapped
+   group names. A wrong credential answers a bad-credential verdict; a
+   directory that cannot answer (connect, TLS, timeout) answers an
+   outage.
 
 Because LDAP is a login method rather than a data-plane bearer verifier,
-`AuthModule::authenticate` returns `Pass` — "not my credential shape" —
-and the auth chain continues.
+`verify` answers `Pass` — "not my credential shape" — and the auth chain
+continues.
 
 There is no `client_secret`: a credential method is not a confidential
 OAuth client, so `LdapConfig` has no such field and
@@ -70,14 +71,15 @@ OAuth client, so `LdapConfig` has no such field and
 
 This repo is a same-repo, 2-crate Cargo workspace, mirroring `auth-oidc`:
 `auth-ldap/` (the `busbar-auth-ldap` library — the real LDAP BIND,
-group-read and role-mapping logic, no plugin ABI) and
-`auth-ldap-plugin/` (the `busbar-auth-ldap-plugin` cdylib adapter, which
-is a thin `export_login_plugin!` shim). A custom build can link the
-library crate statically instead of going through the plugin ABI.
+group-read and role-mapping logic, and its door, `door::door`) and
+`auth-ldap-plugin/` (the `busbar-auth-ldap-plugin` cdylib, which only
+exports that door with `export_door!`). A custom build links the
+library crate and registers `door::door` as a compiled-in row.
 
 LDAP work is done with [`ldap3`](https://crates.io/crates/ldap3) in its
-`sync` + `tls-rustls` configuration: the blocking `LdapConn` is what the
-synchronous `LoginModule::complete_login` signature needs, and rustls
+`sync` + `tls-rustls` configuration: the door's `complete_login` binds
+with the blocking `LdapConn` (the Statement states the `blocks` mark, so
+the host never runs it inline on a worker), and rustls
 keeps the plugin on the same TLS backend as the rest of the ecosystem
 rather than pulling in a second, OpenSSL-based stack.
 
@@ -173,19 +175,14 @@ and for a loopback host.
   `[REDACTED]`; there is no `Display`; plaintext reachable only through an
   explicit `expose()`), which
   bounds the blast radius but does not remove the plaintext from config.
-- **Blocking I/O inside a synchronous FFI call.** `complete_login` is
-  synchronous and the LDAP bind is blocking network I/O, invoked by the
-  engine from an async login handler. The `LoginModule` ABI has no async
-  seam and no "run me on a blocking thread" contract, so a correct
-  deployment depends on the host offloading the plugin call to a
-  blocking thread.
-- **A directory outage is indistinguishable from a bad password to the
-  caller.** `LoginOutcome` has no verdict between `Identify` and
-  `Reject`, so an unreachable or TLS-broken directory collapses into the
-  same fail-closed `Reject` a wrong password produces, and the login
-  page cannot say "try again later". The plugin logs the operational
-  detail (never the credential) at `warn` so an operator can tell the
-  two apart.
+- **The plugin opens its own socket and blocks.** 1.6.0's design moves
+  every plugin connection onto the host's connector (a sans-IO LDAP
+  codec over a host stream); until then the bind is blocking I/O inside
+  `complete_login`, declared with the Statement's `blocks` mark so the
+  host runs it off its workers.
+- **A directory outage answers its own verdict** (`LOGIN_OUTAGE`,
+  distinct from a bad credential), and the plugin logs the operational
+  detail (never the credential) at `warn`.
 - **Group DNs are normalized by the plugin, not the engine.** LDAP and
   AD groups are DNs (`CN=engineers,OU=Groups,DC=corp,DC=example`), which
   make hostile `role_bindings` keys: commas and `=` are awkward in YAML,
@@ -253,10 +250,11 @@ and the plugin crate's. Coverage includes config parsing and
 `deny_unknown_fields` (including `client_secret` being rejected),
 bind-DN templating and LDAP-injection rejection, RFC 4515 filter
 escaping, group-DN → role mapping (CN and DN forms, dedup, escaped
-commas), the `authenticate` defer, `login_kind()`, the `begin_login`
-form shape, `submitted`-map parsing including `Redacted` never leaking
-through `Debug`, and the `complete_login` credential guards for a
-missing or empty field.
+commas), and the login guards for a missing or empty field. The door
+(`auth-ldap/src/door.rs`) is driven through busbar's real loader, linked
+and dropped in, by `auth-ldap-plugin/tests/conformance.rs`: `verify`'s
+pass, the `begin_login` form, the `complete_login` verdicts, and the
+lifecycle's refusal texts.
 
 The live-bind happy path is integration-only: `auth-ldap-plugin/tests/e2e.rs`
 packs the real cdylib with the `busbar-plugin-pack` binary, drives a

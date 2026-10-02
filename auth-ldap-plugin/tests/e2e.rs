@@ -17,8 +17,7 @@
 //! Under CI (`CI` set) the plugin-ci `service: openldap` arm sets it and the tests RUN; an unset URL
 //! under CI FAILS, so a broken service arm cannot turn the only real-directory gate vacuous.
 
-use busbar_contract::auth::{CompleteLogin, LoginModule as _, LoginOutcome};
-use busbar_contract::Redacted;
+use busbar_auth_ldap::Login;
 use std::io::Write as _;
 
 const BASE_DN: &str = "dc=example,dc=org";
@@ -259,21 +258,12 @@ fn seed_directory(url: &str) {
     let _ = ldap.unbind();
 }
 
-/// Run one `complete_login` on the library module directly (no busbar boot).
-fn live_login(settings: serde_json::Value, username: &str, password: &str) -> LoginOutcome {
+/// Run one credential login on the library module directly (no busbar boot).
+fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
     let cfg: busbar_auth_ldap::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
     let module = busbar_auth_ldap::LdapModule::new(cfg).expect("live ldap settings are valid");
-    let req = CompleteLogin {
-        submitted: [
-            ("username".to_string(), Redacted::new(username.to_string())),
-            ("password".to_string(), Redacted::new(password.to_string())),
-        ]
-        .into_iter()
-        .collect(),
-        ..Default::default()
-    };
-    module.complete_login(&req)
+    module.login(Some(username), Some(password))
 }
 
 /// The real `ldap3` backend against the live directory, in BOTH directory shapes: direct bind and
@@ -304,7 +294,7 @@ fn ldap_module_binds_live_in_both_modes_and_maps_the_group() {
     });
     for (mode, settings) in [("direct bind", direct), ("search-then-bind", search)] {
         let principal = match live_login(settings.clone(), "alice", ALICE_PW) {
-            LoginOutcome::Identify(p) => p,
+            Login::Identity(p) => p,
             other => panic!("{mode}: alice with her password must Identify, got {other:?}"),
         };
         assert_eq!(principal.id, format!("ldap:{ALICE_DN}"), "{mode}");
@@ -315,7 +305,7 @@ fn ldap_module_binds_live_in_both_modes_and_maps_the_group() {
         );
         assert_eq!(
             live_login(settings, "alice", "wrong-password"),
-            LoginOutcome::Reject,
+            Login::BadCredential,
             "{mode}: a wrong password must be rejected"
         );
     }

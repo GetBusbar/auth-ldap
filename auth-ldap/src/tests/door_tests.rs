@@ -55,7 +55,7 @@ fn settings_refuse_a_direct_bind_upn_template() {
         "bind_dn_template": "{username}@corp.example",
         "base_dn": "dc=corp,dc=example"
     }"#;
-    let r = Ldap::validate(blob).err().expect("refused");
+    let r = Ldap::validate(blob).expect_err("refused");
     assert!(r.text().is_some_and(|t| t.contains("is not a DN")), "{r:?}");
 }
 

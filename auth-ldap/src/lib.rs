@@ -7,34 +7,27 @@
 //! CREDENTIAL flow that opens ITS OWN socket, exactly like `hashicorp-vault` opens its own HTTPS:
 //!
 //! 1. A dev types username + password on the hosted login page.
-//! 2. The core calls this module's [`LoginModule::complete_login`] with those credentials.
+//! 2. The core calls the door's `complete_login` ([`door`]) with those credentials.
 //! 3. The module opens an LDAP/LDAPS socket to the directory and performs a **BIND** with the
 //!    user's DN + password (this is the credential check — no token, no redirect).
 //! 4. On a successful bind it reads the user's group memberships (`memberOf`, or an AD group query)
-//!    and returns [`busbar_contract::auth::LoginOutcome::Identify`] with a [`Principal`] whose `roles` are the
-//!    group names, mapped to policy downstream by the operator's `auth.role_bindings.ldap`.
+//!    and answers a [`Principal`] whose `roles` are the group names, mapped to policy downstream by
+//!    the operator's `auth.role_bindings.ldap`.
 //!
-//! ## The LDAP credential method
+//! ## The LDAP credential method, on the auth kind's door (abi::auth v3)
 //!
-//! The credential login flow is carried by the auth ABI from v2 on; this plugin is built at auth
-//! ABI 3 (`AUTH_ABI_VERSION`) and declares `contract_abi` 3 in `declares.json`:
-//!
-//! - [`login_kind`](LdapModule::login_kind) declares [`LoginKind::Credential`] so the chooser renders
-//!   a form (not a redirect button) WITHOUT any side-effecting `begin_login` call.
-//! - [`begin_login`](LdapModule::begin_login) returns [`LoginOutcome::Prompt`] with a declarative
-//!   [`LoginForm`] (`username` Text + `password` Password) for the core to render.
-//! - [`complete_login`](LdapModule::complete_login) reads the submitted values back by the field
-//!   `name` it declared (via [`CompleteLogin::submitted`], the one documented plaintext boundary),
-//!   opens its OWN LDAP socket, BINDs, reads groups, and returns `Identify`.
+//! - The Statement's tail declares `LOGIN_KIND_CREDENTIAL`, so the chooser renders a form (not a
+//!   redirect button) WITHOUT any side-effecting `begin_login` call.
+//! - `begin_login` answers the declarative form (`username` text + `password` password).
+//! - `complete_login` reads the submitted values back by the field `name` it declared, opens its
+//!   OWN LDAP socket, BINDs, reads groups ([`LdapModule::login`]), and answers the identity.
+//! - `verify` answers PASS: LDAP judges no bearer credential on the data plane.
 //! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
 //!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
 #![deny(unsafe_code)]
 
-use busbar_contract::auth::{
-    AuthModule, AuthVerdict, BeginLogin, CompleteLogin, FieldKind, LoginField, LoginForm,
-    LoginKind, LoginModule, LoginOutcome, Principal,
-};
+use busbar_contract::auth::Principal;
 use core::fmt;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -179,10 +172,8 @@ impl LdapConfig {
     }
 }
 
-/// The LDAP auth module: a busbar auth plugin that is BOTH a verifier ([`AuthModule`]) and a login
-/// provider ([`LoginModule`]). LDAP is a login-only method (it authenticates a form POST, it does not
-/// verify opaque bearer tokens on the data plane), so [`AuthModule::authenticate`] returns `Pass` —
-/// "not my credential shape" — and the real work is in [`LoginModule::complete_login`].
+/// The LDAP auth module: a login-only method (it authenticates a form POST, it does not verify
+/// opaque bearer tokens on the data plane); the work is [`LdapModule::login`].
 pub struct LdapModule {
     cfg: LdapConfig,
 }
@@ -351,94 +342,14 @@ fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
-impl AuthModule for LdapModule {
-    fn name(&self) -> &'static str {
-        "ldap"
-    }
-
-    /// LDAP is a login (form) method, not a data-plane bearer verifier: it has no opaque credential
-    /// shape to judge, so it always DEFERS. `Pass` keeps the auth chain moving to the next module.
-    fn authenticate(&self, _candidate: Option<&str>) -> AuthVerdict {
-        AuthVerdict::Pass
-    }
-
-    /// A directory lookup over a socket per login — the engine may cache the resulting identity for
-    /// the module-suggested TTL. (Matches the `AuthModule::cacheable` doc's "real I/O per call" case.)
-    fn cacheable(&self) -> bool {
-        true
-    }
-}
-
-/// Look up a submitted credential field by the `name` the plugin declared in its [`LoginForm`].
-/// This is the ONE place the [`Redacted`](busbar_contract::Redacted) value is exposed as plaintext — the
-/// documented `complete_login` credential boundary (only the plugin can perform the bind). Callers
-/// must NOT log the result.
-fn submitted_field<'a>(req: &'a CompleteLogin, name: &str) -> Option<&'a str> {
-    req.submitted
-        .iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.expose_secret().as_str())
-}
-
-impl LoginModule for LdapModule {
-    /// LDAP is a direct-credential (form) method, not a redirect: the chooser reads this ONCE at load
-    /// to render a username/password form instead of a redirect button — no side-effecting
-    /// `begin_login` call, no PKCE state minted.
-    fn login_kind(&self) -> LoginKind {
-        LoginKind::Credential
-    }
-
-    /// Start browser login. LDAP has no external authorize URL — it returns a declarative
-    /// [`LoginForm`] the core renders as a form and POSTs back. The fields are generic (the core
-    /// renders whatever the plugin declares): `username` (Text) + `password` (Password, masked +
-    /// carried [`Redacted`](busbar_contract::Redacted) on the wire). No PKCE/redirect is used.
-    fn begin_login(&self, _req: &BeginLogin) -> LoginOutcome {
-        LoginOutcome::Prompt(LoginForm {
-            fields: vec![
-                LoginField {
-                    name: USERNAME.0.to_string(),
-                    label: USERNAME.1.to_string(),
-                    kind: FieldKind::Text,
-                    required: true,
-                },
-                LoginField {
-                    name: PASSWORD.0.to_string(),
-                    label: PASSWORD.1.to_string(),
-                    kind: FieldKind::Password,
-                    required: true,
-                },
-            ],
-        })
-    }
-
-    /// Handle the credential POST: read the submitted `username`/`password` (keyed by the field names
-    /// declared in [`begin_login`](Self::begin_login)), BIND against the directory, read groups,
-    /// `Identify`.
-    ///
-    /// It opens its OWN LDAP socket here (the door states `MARK_BLOCKS`, so the host never runs it
-    /// inline on a worker). The password crosses as a [`Redacted`](busbar_contract::Redacted) value
-    /// and is exposed only via [`submitted_field`] for the bind; we never log `req` or the exposed
-    /// values. A directory outage is logged and answers the same `Reject` as a wrong password (the
-    /// door answers it as `LOGIN_OUTAGE`).
-    fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
-        match self.login(
-            submitted_field(req, USERNAME.0),
-            submitted_field(req, PASSWORD.0),
-        ) {
-            Login::Identity(principal) => LoginOutcome::Identify(principal),
-            Login::BadCredential | Login::Outage => LoginOutcome::Reject,
-        }
-    }
-}
-
 /// The login form's username field: its `name` and label, as `begin_login` declares it (both doors).
 pub(crate) const USERNAME: (&str, &str) = ("username", "Username");
 /// The login form's password field: its `name` and label.
 pub(crate) const PASSWORD: (&str, &str) = ("password", "Password");
 
 /// What one credential submission came to.
-#[derive(Debug)]
-pub(crate) enum Login {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Login {
     /// The directory bound the user: who.
     Identity(Principal),
     /// No usable credential, or the directory refused it.
@@ -467,7 +378,7 @@ impl LdapModule {
     /// One credential submission: the `username` and `password` the form declared, absent when not
     /// submitted. An absent field or an empty password never reaches the socket (an empty password
     /// is an anonymous bind that "succeeds" on many directories).
-    pub(crate) fn login(&self, username: Option<&str>, password: Option<&str>) -> Login {
+    pub fn login(&self, username: Option<&str>, password: Option<&str>) -> Login {
         let (Some(username), Some(password)) = (username, password) else {
             return Login::BadCredential;
         };

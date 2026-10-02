@@ -11,7 +11,7 @@
 //! it only when its Statement renders byte for byte as the linked row's). Each is bound to a real
 //! dispatcher and driven over the same script through the auth table: `validate` over the module's
 //! refusals, `open`, `verify` (PASS), `begin_login` (the credential form), `complete_login` without
-//! a password, with a username the DN template refuses, and against a directory that is not there
+//! a password, with a username the DN template refuses (DN injection), and against a directory that is not there
 //! (OUTAGE), an outbound op (REFUSED), `refresh` refused and accepted, `close`. The two transcripts
 //! must be equal. The live BIND against a real directory is `tests/e2e.rs` (OpenLDAP container).
 //!
@@ -259,7 +259,7 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
         begin_login(p),
         complete_login(p, &[("username", "alice")]),
         complete_login(p, &[("username", "alice"), ("password", "")]),
-        complete_login(p, &[("username", "bad)(user"), ("password", "pw")]),
+        complete_login(p, &[("username", "admin,dc=example"), ("password", "pw")]),
         complete_login(p, &[("username", "alice"), ("password", "pw")]),
         open_outbound(p),
         refresh(p, "", 2),
@@ -327,8 +327,8 @@ fn the_linked_and_the_dropped_in_ldap_door_are_one_module() {
     // RED ARM 2: a stated rendering one byte off the door's is refused before any slot is called.
     let mut other = stated.clone();
     *other.last_mut().expect("a rendering has bytes") ^= 1;
-    let e = load_dropped::<Auth>(&cdylib(), &other, bind(&d))
-        .err()
-        .expect("a Statement that is not the door's is refused");
-    assert!(!e.to_string().is_empty());
+    match load_dropped::<Auth>(&cdylib(), &other, bind(&d)) {
+        Ok(_) => panic!("a Statement that is not the door's must be refused"),
+        Err(e) => assert!(!e.to_string().is_empty()),
+    }
 }
