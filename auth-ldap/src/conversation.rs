@@ -154,6 +154,11 @@ struct Doing {
     entries: Vec<DirEntry>,
 }
 
+/// What a login that passed its deadline answers, after its operation's prefix (`bind: `, ...):
+/// 1.5.5's words for an ldap3 operation timeout (`LdapError::Timeout`, whose `Elapsed` reads
+/// "deadline has elapsed").
+pub const TIMEOUT: &str = "timeout: deadline has elapsed";
+
 /// How much one read asks for.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -229,18 +234,18 @@ pub(crate) struct Over<'a, W: Wire> {
     wire: &'a mut W,
     endpoint: Result<Endpoint, String>,
     op: usize,
-    expired: Option<u64>,
+    expired: bool,
 }
 
 impl<'a, W: Wire> Over<'a, W> {
-    /// The backend for one entry: `url`/`start_tls` name the directory; `expired` = the timeout
-    /// (seconds) when the conversation's deadline has passed.
+    /// The backend for one entry: `url`/`start_tls` name the directory; `expired` = the
+    /// conversation's deadline has passed.
     pub(crate) fn new(
         conv: &'a mut Conversation,
         wire: &'a mut W,
         url: &str,
         start_tls: bool,
-        expired: Option<u64>,
+        expired: bool,
     ) -> Self {
         Self {
             conv,
@@ -271,8 +276,8 @@ impl<'a, W: Wire> Over<'a, W> {
 
     /// The operation in progress, begun as `start` when none is.
     fn doing(&mut self, start: impl FnOnce(&mut Conversation) -> Doing) -> Result<(), Io> {
-        if let Some(secs) = self.expired {
-            return self.fail(format!("the directory did not answer within {secs}s"));
+        if self.expired {
+            return self.fail(TIMEOUT);
         }
         if self.conv.doing.is_none() {
             let d = start(&mut *self.conv);

@@ -430,6 +430,9 @@ fn a_hostless_url_fails_closed_before_any_dial() {
 #[test]
 fn an_endpoint_reads_its_target_and_security() {
     for (url, tls, target, host, security) in [
+        ("ldap://h", false, "h:389", "h", Security::Plain),
+        ("ldap://h:1389", false, "h:1389", "h", Security::Plain),
+        ("ldaps://h", false, "h:636", "h", Security::Implicit),
         (
             "ldap://ad.corp:1389",
             false,
@@ -562,4 +565,85 @@ fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let got = m.login_over(&mut conv, &mut dir, Some("alice"), Some("pw"), None);
     assert_eq!(got, Poll::Ready(Login::Outage));
     assert!(!conv.opened());
+}
+
+/// Opens, takes every byte, never answers.
+struct Mute;
+
+impl Wire for Mute {
+    fn establish(&mut self, _: &str) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+    fn secure(&mut self) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+    fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
+        Poll::Ready(Ok(b.len()))
+    }
+    fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
+        Poll::Pending
+    }
+}
+
+/// The timeout answers as 1.5.5 answered an ldap3 operation timeout: an outage (1.5.5's Reject),
+/// its text the operation's prefix then `timeout: deadline has elapsed` (`LdapError::Timeout`).
+#[test]
+fn a_timeout_reads_in_1_5_5s_words() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut mute = Mute;
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut mute, "ldap://127.0.0.1", false, false);
+    assert!(matches!(
+        m.bind_and_identify(&mut over, "alice", "pw"),
+        Err(crate::BindError::Pending)
+    ));
+    let mut over = super::Over::new(&mut conv, &mut mute, "ldap://127.0.0.1", false, true);
+    match m.bind_and_identify(&mut over, "alice", "pw") {
+        Err(crate::BindError::Directory(e)) => assert_eq!(e, "bind: timeout: deadline has elapsed"),
+        other => panic!("{other:?}"),
+    }
+    // Expired before the stream opened: the connect's prefix, as 1.5.5's connect timeout.
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut mute, "ldap://127.0.0.1", false, true);
+    match m.bind_and_identify(&mut over, "alice", "pw") {
+        Err(crate::BindError::Directory(e)) => {
+            assert_eq!(e, "connect ldap://127.0.0.1: timeout: deadline has elapsed");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The resolved service password (the kernel's secret, over the settings literal) is what the
+/// service bind sends, and it appears in no error text the login logs and not in the module's
+/// `Debug`: a failed service bind, a malformed reply and a closed stream are each checked.
+#[test]
+fn the_resolved_service_secret_reaches_only_the_bind() {
+    const SECRET: &str = "s3cr3t-resolved";
+    let settings = serde_json::json!({
+        "url": "ldap://127.0.0.1",
+        "bind_dn_template": "uid={username},dc=x",
+        "base_dn": "dc=x",
+        "user_search_filter": "(uid={username})",
+        "bind_service_dn": "cn=svc,dc=x",
+        "bind_service_password": "literal",
+    })
+    .to_string();
+    let m =
+        LdapModule::from_settings_with(settings.as_bytes(), &[SECRET.as_bytes()]).expect("opens");
+    assert!(!format!("{:?}", m.cfg).contains(SECRET), "Debug leaks it");
+    let malformed = message(1, ber::element(0x61, &ber::element(0x04, b"")));
+    for replies in [vec![bind_response(1, 52)], vec![malformed], Vec::new()] {
+        let mut dir = Directory::new(replies);
+        let mut conv = Conversation::new();
+        let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, false);
+        match m.bind_and_identify(&mut over, "alice", "pw") {
+            Err(crate::BindError::Directory(e)) => assert!(!e.contains(SECRET), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            dir.written,
+            codec::bind(1, "cn=svc,dc=x", SECRET),
+            "the bind sends it"
+        );
+    }
 }

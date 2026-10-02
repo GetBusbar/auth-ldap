@@ -419,10 +419,7 @@ impl LdapModule {
             return Poll::Ready(Login::BadCredential);
         }
         conv.arm(now_ns, self.cfg.timeout_secs);
-        let expired = match (conv.deadline_ns(), now_ns) {
-            (Some(d), Some(n)) if n >= d => Some(self.cfg.timeout_secs),
-            _ => None,
-        };
+        let expired = matches!((conv.deadline_ns(), now_ns), (Some(d), Some(n)) if n >= d);
         let mut over = Over::new(conv, wire, &self.cfg.url, self.cfg.start_tls, expired);
         match self.bind_and_identify(&mut over, username, password) {
             Ok(principal) => Poll::Ready(Login::Identity(principal)),
