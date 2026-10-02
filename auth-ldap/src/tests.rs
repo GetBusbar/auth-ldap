@@ -2,12 +2,13 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Unit tests for the PURE surface of the LDAP module: config parsing, bind-DN templating +
-//! injection defense, LDAP filter escaping, and the group-DN → role normalization. The BIND itself
-//! needs a live directory and is not covered here.
+//! injection defense, LDAP filter escaping, the group-DN → role normalization, and the bind logic
+//! over a fake directory. The codec and the conversation over a stream have their own files
+//! (`tests/codec_tests.rs`, `tests/conversation_tests.rs`); the live BIND is the plugin's e2e.
 
 use crate::groups::{escape_filter, first_cn, roles_from_group_dns, validate_username};
 use crate::{
-    principal_id, BindError, DirEntry, LdapBackend, LdapConfig, LdapModule, Login, RoleFrom,
+    principal_id, BindError, DirEntry, Io, LdapBackend, LdapConfig, LdapModule, Login, RoleFrom,
     SearchScope,
 };
 use std::collections::HashMap;
@@ -361,33 +362,6 @@ fn timeout_duration_derives_from_secs() {
     assert_eq!(cfg.timeout(), std::time::Duration::from_secs(7));
 }
 
-/// The per-operation timeout is actually APPLIED to the real `ldap3` connection: against a directory
-/// that accepts the TCP connection and never answers, the bind gives up after `timeout_secs` and the
-/// login is rejected. Without `with_timeout` before the bind (`RealLdap::simple_bind`) the bind would
-/// wait forever and this test fails. It does NOT cover the `with_timeout` before a search: the bind
-/// never completes here, so no search is reached.
-#[test]
-fn a_directory_that_never_answers_is_rejected_after_the_timeout() {
-    // Accepted by the kernel's backlog, never read from or answered.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
-    let port = listener.local_addr().unwrap().port();
-    let mut cfg = base_cfg();
-    cfg.url = format!("ldap://127.0.0.1:{port}");
-    cfg.timeout_secs = 1;
-    let m = LdapModule::new(cfg).unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = m.login(Some("alice"), Some("pw"));
-        let _ = tx.send(out);
-    });
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .expect("the bind must give up after timeout_secs, not wait on the silent directory");
-    assert_eq!(out, Login::Outage);
-    drop(listener);
-}
-
 #[test]
 fn roles_cn_mode_maps_and_dedups() {
     let dns = vec![
@@ -439,14 +413,37 @@ fn roles_empty_when_no_groups() {
 
 // ── The credential flow ─────────────────────────────────────────────────────────────────────────
 
-/// `login` refuses absent credentials and an empty (anonymous-bind) password without ever
-/// reaching the socket. The happy path (real bind -> Identity) needs a live directory: tests/e2e.rs.
+/// A wire the test never expects to be touched.
+struct Untouched;
+
+impl crate::conversation::Wire for Untouched {
+    fn establish(&mut self, _: &str) -> std::task::Poll<Result<(), String>> {
+        panic!("a refused credential never reaches the wire")
+    }
+    fn secure(&mut self) -> std::task::Poll<Result<(), String>> {
+        panic!("a refused credential never reaches the wire")
+    }
+    fn write(&mut self, _: &[u8]) -> std::task::Poll<Result<usize, String>> {
+        panic!("a refused credential never reaches the wire")
+    }
+    fn read(&mut self, _: &mut [u8]) -> std::task::Poll<Result<usize, String>> {
+        panic!("a refused credential never reaches the wire")
+    }
+}
+
+/// `login_over` refuses absent credentials and an empty (anonymous-bind) password without ever
+/// reaching the wire. The happy path (real bind -> Identity) is the conversation's tests and e2e.
 #[test]
 fn login_refuses_missing_or_empty_credentials() {
     let m = LdapModule::new(base_cfg()).unwrap();
-    assert_eq!(m.login(None, None), Login::BadCredential);
-    assert_eq!(m.login(Some("alice"), None), Login::BadCredential);
-    assert_eq!(m.login(Some("alice"), Some("")), Login::BadCredential);
+    let login = |u: Option<&str>, p: Option<&str>| {
+        let mut conv = crate::conversation::Conversation::new();
+        m.login_over(&mut conv, &mut Untouched, u, p, None)
+    };
+    use std::task::Poll::Ready;
+    assert_eq!(login(None, None), Ready(Login::BadCredential));
+    assert_eq!(login(Some("alice"), None), Ready(Login::BadCredential));
+    assert_eq!(login(Some("alice"), Some("")), Ready(Login::BadCredential));
 }
 
 /// LDAP is a `Credential` method: it has no confidential-client `client_secret`. The config type has
@@ -516,11 +513,11 @@ struct FakeLdap {
 }
 
 impl LdapBackend for FakeLdap {
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, String> {
+    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io> {
         self.binds.push(dn.to_string());
         self.bind_pairs.push((dn.to_string(), password.to_string()));
         if self.bind_err_on.as_deref() == Some(dn) {
-            return Err(format!("transport failure binding {dn}"));
+            return Err(format!("transport failure binding {dn}").into());
         }
         let rc = if self.reject_password.as_deref() == Some(password) {
             self.reject_rc.unwrap_or(49)
@@ -536,7 +533,7 @@ impl LdapBackend for FakeLdap {
         scope: SearchScope,
         filter: &str,
         attrs: &[&str],
-    ) -> Result<Vec<DirEntry>, String> {
+    ) -> Result<Vec<DirEntry>, Io> {
         let label = match scope {
             SearchScope::Base => "base",
             SearchScope::Subtree => "subtree",
@@ -551,14 +548,14 @@ impl LdapBackend for FakeLdap {
             SearchScope::Subtree => {
                 self.filters.push(filter.to_string());
                 if self.subtree_err {
-                    return Err("transport failure on user search".to_string());
+                    return Err("transport failure on user search".to_string().into());
                 }
                 Ok(self.search_entries.clone())
             }
             // group read off the bound user entry
             SearchScope::Base => {
                 if self.base_err {
-                    return Err("transport failure on group read".to_string());
+                    return Err("transport failure on group read".to_string().into());
                 }
                 let mut attrs = HashMap::new();
                 if !self.group_values.is_empty() {
@@ -572,8 +569,9 @@ impl LdapBackend for FakeLdap {
         }
     }
 
-    fn unbind(&mut self) {
+    fn unbind(&mut self) -> Result<(), Io> {
         self.unbound = true;
+        Ok(())
     }
 }
 
