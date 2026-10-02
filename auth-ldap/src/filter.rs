@@ -90,15 +90,13 @@ fn assertion(tag: u8, attr: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn non_eq(i: &[u8]) -> Parsed<'_> {
     let (attr, i) = attributedescription(i)?;
-    let (tag, i) = if let Some(r) = i.strip_prefix(b">=") {
-        (GREATER_OR_EQUAL, r)
-    } else if let Some(r) = i.strip_prefix(b"<=") {
-        (LESS_OR_EQUAL, r)
-    } else if let Some(r) = i.strip_prefix(b"~=") {
-        (APPROX, r)
-    } else {
-        return None;
-    };
+    let (tag, i) = [
+        (&b">="[..], GREATER_OR_EQUAL),
+        (&b"<="[..], LESS_OR_EQUAL),
+        (&b"~="[..], APPROX),
+    ]
+    .into_iter()
+    .find_map(|(op, tag)| i.strip_prefix(op).map(|r| (tag, r)))?;
     let (value, i) = unescaped(i)?;
     Some((assertion(tag, attr, &value), i))
 }
