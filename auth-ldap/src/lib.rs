@@ -33,7 +33,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub mod ber;
+pub mod codec;
 pub mod door;
+pub mod filter;
 pub mod groups;
 
 #[cfg(test)]
