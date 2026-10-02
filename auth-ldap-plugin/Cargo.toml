@@ -5,28 +5,37 @@ version = "0.1.0"
 publish = false
 edition = "2021"
 rust-version = "1.97"
-description = "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder and add `ldap` to auth.chain / auth.methods with auth.methods.ldap settings (url, bind_dn_template, base_dn, group_attr)."
+description = "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth kind's door. Drop it in the plugins folder and add `ldap` to auth.chain / auth.methods with auth.methods.ldap settings (url, bind_dn_template, base_dn, group_attr)."
 license = "Apache-2.0"
 
 [lib]
+# cdylib: the DROPPED-IN door, exporting `busbar_plugin_door`. rlib: what `cargo test` links, and
+# what makes the conformance test's cdylib get built.
 crate-type = ["cdylib", "rlib"]
+
+[features]
+# THE DROPPED-IN DOOR: `export_door!` emits the image's one symbol. On by default, since this crate
+# exists to be the cdylib (busbar's plugin-release builds it with no feature flags); a build that
+# links this crate as a row turns it off, or links `busbar-auth-ldap` instead.
+default = ["dropped-in"]
+dropped-in = []
 
 [dependencies]
 # The one busbar crate (#40): busbar-contract, whose `abi::sdk` carries the export macro — pinned by
 # git rev to `.busbar-ref` field 1.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
 busbar-auth-ldap = { path = "../auth-ldap" }
-serde_json = "1"
 
 [dev-dependencies]
 # Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves): the linked +
-# dropped-in conformance test (tests/conformance.rs) signs, packs, scans and opens the built cdylib
-# over the REAL loader; and the live plugin-side e2e (tests/e2e.rs) uses it to locate the built cdylib (plugin-loader's
-# filename helper), pack it with the real busbar-plugin-pack BINARY (spawned), drive real blocking HTTP
-# against a spawned real busbar binary + an OpenLDAP service container, and SEED that directory over
-# LDAP (ldap3, the same client the plugin uses — sync + tls-rustls, matching the plugin's own feature
-# set).
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040" }
+# dropped-in conformance test (tests/conformance.rs) admits the linked door and the built cdylib
+# through the REAL loader and drives both through its dispatcher; and the live plugin-side e2e
+# (tests/e2e.rs) uses it to locate the built cdylib (plugin-loader's filename helper), pack it with
+# the real busbar-plugin-pack BINARY (spawned), drive real blocking HTTP against a spawned real busbar
+# binary + an OpenLDAP service container, and SEED that directory over LDAP (ldap3, the same client
+# the plugin uses — sync + tls-rustls, matching the plugin's own feature set).
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }
+serde_json = "1"

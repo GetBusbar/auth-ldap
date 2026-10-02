@@ -29,6 +29,8 @@
 //! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
 //!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
+#![deny(unsafe_code)]
+
 use busbar_contract::auth::{
     AuthModule, AuthVerdict, BeginLogin, CompleteLogin, FieldKind, LoginField, LoginForm,
     LoginKind, LoginModule, LoginOutcome, Principal,
@@ -38,6 +40,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub mod door;
 pub mod groups;
 
 #[cfg(test)]
@@ -393,14 +396,14 @@ impl LoginModule for LdapModule {
         LoginOutcome::Prompt(LoginForm {
             fields: vec![
                 LoginField {
-                    name: "username".to_string(),
-                    label: "Username".to_string(),
+                    name: USERNAME.0.to_string(),
+                    label: USERNAME.1.to_string(),
                     kind: FieldKind::Text,
                     required: true,
                 },
                 LoginField {
-                    name: "password".to_string(),
-                    label: "Password".to_string(),
+                    name: PASSWORD.0.to_string(),
+                    label: PASSWORD.1.to_string(),
                     kind: FieldKind::Password,
                     required: true,
                 },
@@ -412,42 +415,71 @@ impl LoginModule for LdapModule {
     /// declared in [`begin_login`](Self::begin_login)), BIND against the directory, read groups,
     /// `Identify`.
     ///
-    /// It opens its OWN LDAP socket here — the loader runs this in-process with no sandbox (same
-    /// six-symbol dlopen path as store/secret/vault plugins), so a plugin-opened socket is allowed.
-    /// The password crosses as a [`Redacted`](busbar_contract::Redacted) value on the engine side and is
-    /// exposed only via [`submitted_field`] for the bind; we never log `req` or the exposed values.
+    /// It opens its OWN LDAP socket here (the door states `MARK_BLOCKS`, so the host never runs it
+    /// inline on a worker). The password crosses as a [`Redacted`](busbar_contract::Redacted) value
+    /// and is exposed only via [`submitted_field`] for the bind; we never log `req` or the exposed
+    /// values. A directory outage is logged and answers the same `Reject` as a wrong password (the
+    /// door answers it as `LOGIN_OUTAGE`).
     fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
-        let (Some(username), Some(password)) = (
-            submitted_field(req, "username"),
-            submitted_field(req, "password"),
-        ) else {
-            // No credentials submitted on this call — nothing to bind. Fail closed.
-            return LoginOutcome::Reject;
+        match self.login(
+            submitted_field(req, USERNAME.0),
+            submitted_field(req, PASSWORD.0),
+        ) {
+            Login::Identity(principal) => LoginOutcome::Identify(principal),
+            Login::BadCredential | Login::Outage => LoginOutcome::Reject,
+        }
+    }
+}
+
+/// The login form's username field: its `name` and label, as `begin_login` declares it (both doors).
+pub(crate) const USERNAME: (&str, &str) = ("username", "Username");
+/// The login form's password field: its `name` and label.
+pub(crate) const PASSWORD: (&str, &str) = ("password", "Password");
+
+/// What one credential submission came to.
+#[derive(Debug)]
+pub(crate) enum Login {
+    /// The directory bound the user: who.
+    Identity(Principal),
+    /// No usable credential, or the directory refused it.
+    BadCredential,
+    /// The directory could not answer (connect, TLS, timeout, a non-49 result code). Logged here,
+    /// never the credential.
+    Outage,
+}
+
+impl LdapModule {
+    /// The module from its settings blob (one JSON document): an empty blob is refused, since an
+    /// LDAP module with no URL/DN template can never bind anyone, so a boot-time error naming the
+    /// reference beats deferring to every login.
+    pub fn from_settings(settings: &[u8]) -> Result<Self, String> {
+        if settings.trim_ascii().is_empty() {
+            return Err(
+                "ldap plugin requires config (url, bind_dn_template, base_dn); none provided"
+                    .to_string(),
+            );
+        }
+        let cfg: LdapConfig = serde_json::from_slice(settings)
+            .map_err(|e| format!("invalid ldap plugin config: {e}"))?;
+        Self::new(cfg)
+    }
+
+    /// One credential submission: the `username` and `password` the form declared, absent when not
+    /// submitted. An absent field or an empty password never reaches the socket (an empty password
+    /// is an anonymous bind that "succeeds" on many directories).
+    pub(crate) fn login(&self, username: Option<&str>, password: Option<&str>) -> Login {
+        let (Some(username), Some(password)) = (username, password) else {
+            return Login::BadCredential;
         };
         if password.is_empty() {
-            // Reject an unauthenticated (anonymous) bind attempt outright — an empty password against
-            // many directories is an anonymous bind that "succeeds" without authenticating anyone.
-            return LoginOutcome::Reject;
+            return Login::BadCredential;
         }
-
-        // ABI GAP (async / reactor-blocking): `complete_login` is SYNC and the LDAP bind is blocking
-        // network I/O. OIDC never blocks — the CORE executes its HTTP hop on the core's async side.
-        // LDAP must do the I/O itself, inside this sync FFI call, which the engine invokes from an
-        // async login handler. There is no async seam and no "run me on a blocking thread" contract in
-        // the LoginModule ABI, so a correct deployment must ensure the host offloads the plugin call
-        // to a blocking thread. See Limitations in the README.
         match self.bind_and_identify(username, password) {
-            Ok(principal) => LoginOutcome::Identify(principal),
-            Err(BindError::InvalidCredentials) => LoginOutcome::Reject,
+            Ok(principal) => Login::Identity(principal),
+            Err(BindError::InvalidCredentials) => Login::BadCredential,
             Err(BindError::Directory(e)) => {
-                // A directory-side failure (server unreachable, TLS error) is NOT "bad password". The
-                // ABI's `LoginOutcome` has no `Error`/`Retry` variant distinct from `Reject`, so an
-                // outage is squashed into the same fail-closed verdict as a wrong password — the user
-                // sees "login failed" with no way for the page to say "try again later". (Minor gap;
-                // see Limitations in the README.) The operational detail is logged (never the
-                // credential) so an operator can tell the two apart.
                 tracing::warn!(module = "ldap", error = %e, "ldap bind/search failed (not a credential rejection)");
-                LoginOutcome::Reject
+                Login::Outage
             }
         }
     }
@@ -663,8 +695,8 @@ impl LdapModule {
 
         // The credential check: BIND as the user with the presented password. Result code 49
         // (invalidCredentials) is a credential rejection. Any other non-zero code (e.g. 51 busy,
-        // 52 unavailable) is a directory-side failure: still a Reject, but logged by
-        // `complete_login` so an outage is not mistaken for a wrong password.
+        // 52 unavailable) is a directory-side failure: still refused, but logged by
+        // `login` so an outage is not mistaken for a wrong password.
         let rc = ldap
             .simple_bind(&user_dn, password)
             .map_err(|e| BindError::Directory(format!("bind: {e}")))?;
