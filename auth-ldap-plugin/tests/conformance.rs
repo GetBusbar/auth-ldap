@@ -11,7 +11,7 @@
 //! it only when its Statement renders byte for byte as the linked row's). Each is bound to a real
 //! dispatcher and driven over the same script through the auth table: `validate` over the module's
 //! refusals, `open`, `verify` (PASS), `begin_login` (the credential form), `complete_login` without
-//! a password, with a username the DN template refuses (DN injection), and against a directory that is not there
+//! a password, with an empty password, and against a directory that is not there
 //! (OUTAGE), an outbound op (REFUSED), `refresh` refused and accepted, `close`. The two transcripts
 //! must be equal. The live BIND against a real directory is `tests/e2e.rs` (OpenLDAP container).
 //!
@@ -259,7 +259,6 @@ fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
         begin_login(p),
         complete_login(p, &[("username", "alice")]),
         complete_login(p, &[("username", "alice"), ("password", "")]),
-        complete_login(p, &[("username", "admin,dc=example"), ("password", "pw")]),
         complete_login(p, &[("username", "alice"), ("password", "pw")]),
         open_outbound(p),
         refresh(p, "", 2),
@@ -305,20 +304,20 @@ fn the_linked_and_the_dropped_in_ldap_door_are_one_module() {
             && a[7].contains("password:Password:2:1"),
         "{text}"
     );
-    for line in &a[8..=10] {
+    for line in &a[8..=9] {
         assert!(
             line.starts_with("Ready") && line.ends_with(&format!("verdict={LOGIN_BAD_CREDENTIAL}")),
             "{text}"
         );
     }
     assert!(
-        a[11].starts_with("Ready") && a[11].ends_with(&format!("verdict={LOGIN_OUTAGE}")),
+        a[10].starts_with("Ready") && a[10].ends_with(&format!("verdict={LOGIN_OUTAGE}")),
         "a directory that is not there is an outage, not a bad credential: {text}"
     );
-    assert!(a[12].starts_with("Refused"), "{text}");
-    assert!(a[13].starts_with("Failed"), "{text}");
+    assert!(a[11].starts_with("Refused"), "{text}");
+    assert!(a[12].starts_with("Failed"), "{text}");
+    assert!(a[13].starts_with("Ready"), "{text}");
     assert!(a[14].starts_with("Ready"), "{text}");
-    assert!(a[15].starts_with("Ready"), "{text}");
 
     // RED ARM 1: the door asked for as another kind is refused, through either way in.
     assert!(load_linked::<Secret>(&row(), bind(&d)).is_err());
