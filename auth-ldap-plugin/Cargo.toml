@@ -13,6 +13,15 @@ license = "Apache-2.0"
 # what makes the conformance test's cdylib get built.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# THE DROPPED-IN DOOR: `export_door!` emits the one C symbol `busbar_plugin_door`, and ONLY the
+# dropped-in cdylib may export it (compiled in = dropped in, one table: a busbar build that links
+# this crate as a row, alone or beside others, must carry no door symbol, or two doors in one
+# binary multiply define it under `lto = "fat"`). OFF by default; the dropped-in artifact is built
+# `cargo build --release -p busbar-auth-ldap-plugin --features dropped-in`, and `cargo test` names this crate
+# below with it on so the cdylib the conformance test opens carries the door.
+dropped-in = []
+
 [dependencies]
 # The one busbar crate (#40): busbar-contract, whose `abi::sdk` carries the export macro — pinned by
 # git rev to `.busbar-ref` field 1.
@@ -20,6 +29,8 @@ busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e
 busbar-auth-ldap = { path = "../auth-ldap" }
 
 [dev-dependencies]
+# The conformance test opens this crate's own cdylib WITH its dropped-in door on (see `[features]`).
+busbar-auth-ldap-plugin = { path = ".", features = ["dropped-in"] }
 # Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves): the linked +
 # dropped-in conformance test (tests/conformance.rs) admits the linked door and the built cdylib
 # through the REAL loader and drives both through its dispatcher; and the live plugin-side e2e
