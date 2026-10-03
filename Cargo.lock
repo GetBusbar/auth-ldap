@@ -135,6 +135,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "busbar-auth-ldap",
+ "busbar-auth-ldap-plugin",
  "busbar-contract",
  "busbar-plugin-loader",
  "ldap3",
